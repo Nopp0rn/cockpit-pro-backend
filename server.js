@@ -133,14 +133,16 @@ app.post("/webhook", async (req, res) => {
   // ตรวจสอบว่า Webhook มาจากสาขาไหนโดยเทียบ Secret ทุกสาขา
   let branchId = null;
   const env = process.env;
-  for(const key of Object.keys(env)) {
-    if(key.startsWith("LINE_SECRET_")) {
-      const secret = env[key];
-      const hash = crypto.createHmac("sha256", secret).update(bodyBuf).digest("base64");
-      if(hash === signature) {
-        branchId = key.replace("LINE_SECRET_", "");
-        break;
-      }
+  const lineSecretKeys = Object.keys(env).filter(k => k.startsWith("LINE_SECRET_"));
+  console.log(`🔍 Checking signature against: ${lineSecretKeys.join(", ")}`);
+
+  for(const key of lineSecretKeys) {
+    const secret = env[key];
+    const hash = crypto.createHmac("sha256", secret).update(bodyBuf).digest("base64");
+    console.log(`   ${key}: hash=${hash.substring(0,10)}... sig=${signature?.substring(0,10)}... match=${hash === signature}`);
+    if(hash === signature) {
+      branchId = key.replace("LINE_SECRET_", "");
+      break;
     }
   }
   // fallback สำหรับ LINE_CHANNEL_SECRET เดิม
