@@ -74,20 +74,31 @@ async function resolveUserId(job) {
   if (job.userId) return { userId: job.userId, branchId: cleanBranchId(job.branchId), province: job.province || "" };
   if (!job.plate) return null;
   const normalizedPlate = normalizePlate(job.plate);
+  const jobProvince = (job.province || "").trim();
   try {
     const snap = await db.collection("lineUsers").get();
+    let bestMatch = null;
     for (const doc of snap.docs) {
       const data = doc.data();
-      if (normalizePlate(data.plate) === normalizedPlate) {
-        const userId = data.userId;
-        const userBranchId = cleanBranchId(data.branchId || job.branchId);
-        const province = data.province || "";
-        if (job._ref) await job._ref.update({ userId, branchId: userBranchId, province });
-        console.log(`✅ resolveUserId: ${normalizedPlate} → ${userId} via ${userBranchId} จ.${province}`);
-        return { userId, branchId: userBranchId, province };
+      if (normalizePlate(data.plate) !== normalizedPlate) continue;
+
+      // ถ้ามีจังหวัดทั้งสองฝั่ง ต้องตรงกัน
+      const userProvince = (data.province || "").trim();
+      if (jobProvince && userProvince && jobProvince !== userProvince) {
+        console.log(`⏭️ Plate match but province mismatch: job=${jobProvince} user=${userProvince}`);
+        continue; // ข้ามถ้าจังหวัดไม่ตรง
       }
+
+      bestMatch = { userId: data.userId, branchId: cleanBranchId(data.branchId || job.branchId), province: userProvince };
+      break;
     }
-    console.log(`❌ resolveUserId: plate "${normalizedPlate}" not found`);
+
+    if (bestMatch) {
+      if (job._ref) await job._ref.update({ userId: bestMatch.userId, branchId: bestMatch.branchId, province: bestMatch.province });
+      console.log(`✅ resolveUserId: ${normalizedPlate} จ.${bestMatch.province} → ${bestMatch.userId}`);
+      return bestMatch;
+    }
+    console.log(`❌ resolveUserId: ไม่พบ ${normalizedPlate} จ.${jobProvince}`);
   } catch (e) {
     console.error("resolveUserId error:", e.message);
   }
@@ -326,19 +337,24 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     const { plate, phone, province, userId: manualUserId, jobs } = req.body;
     if (!plate || !phone || !jobs?.length) return res.status(400).json({ error: "plate, phone, jobs required" });
 
-    // Auto-lookup userId จากทะเบียนรถที่ลูกค้าพิมพ์ใน LINE ไว้ก่อนหน้า
+    // Auto-lookup userId โดยต้องตรงทั้ง plate และ province
     let userId = manualUserId || null;
     if (!userId) {
       const normalizedPlate = normalizePlate(plate);
-      // scan lineUsers ทั้งหมด แล้ว normalize เปรียบเทียบ
+      const jobProvince = (province || "").trim();
       const allUsers = await db.collection("lineUsers").get();
       for (const doc of allUsers.docs) {
         const data = doc.data();
-        if (normalizePlate(data.plate) === normalizedPlate) {
-          userId = data.userId;
-          console.log(`✅ open job: found userId ${userId} for plate ${normalizedPlate}`);
-          break;
+        if (normalizePlate(data.plate) !== normalizedPlate) continue;
+        const userProvince = (data.province || "").trim();
+        // ถ้ามีจังหวัดทั้งสองฝั่ง ต้องตรงกัน
+        if (jobProvince && userProvince && jobProvince !== userProvince) {
+          console.log(`⏭️ open job: province mismatch job=${jobProvince} user=${userProvince}`);
+          continue;
         }
+        userId = data.userId;
+        console.log(`✅ open job: found ${normalizedPlate} จ.${userProvince} → ${userId}`);
+        break;
       }
     }
 
