@@ -59,25 +59,30 @@ async function pushMessage(userId, messages, branchId="BR107") {
 // ─── Flex Message Builder ──────────────────────────────────
 
 // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
-function cleanBranchId(id) {
-  if (!id) return id;
-  // ลบอักขระพิเศษที่ไม่ใช่ตัวอักษรและตัวเลข
-  return id.replace(/[^\w]/g, "").toUpperCase();
+function normalizePlate(plate) {
+  if (!plate) return "";
+  // Normalize Unicode และลบช่องว่าง แปลงเป็นตัวพิมพ์ใหญ่
+  return plate.normalize("NFC").replace(/\s+/g, "").toUpperCase();
 }
 
 async function resolveUserId(job) {
   if (job.userId) return { userId: job.userId, branchId: cleanBranchId(job.branchId) };
   if (!job.plate) return null;
+  const normalizedPlate = normalizePlate(job.plate);
   try {
-    const snap = await db.collection("lineUsers")
-      .where("plate", "==", job.plate.toUpperCase()).limit(1).get();
-    if (!snap.empty) {
-      const data = snap.docs[0].data();
-      const userId = data.userId;
-      const userBranchId = cleanBranchId(data.branchId || job.branchId);
-      if (job._ref) await job._ref.update({ userId, branchId: userBranchId });
-      return { userId, branchId: userBranchId };
+    // ค้นหาทุก lineUsers แล้ว filter ด้วย normalized plate
+    const snap = await db.collection("lineUsers").get();
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      if (normalizePlate(data.plate) === normalizedPlate) {
+        const userId = data.userId;
+        const userBranchId = cleanBranchId(data.branchId || job.branchId);
+        if (job._ref) await job._ref.update({ userId, branchId: userBranchId });
+        console.log(`✅ resolveUserId: ${normalizedPlate} → ${userId} via ${userBranchId}`);
+        return { userId, branchId: userBranchId };
+      }
     }
+    console.log(`❌ resolveUserId: plate "${normalizedPlate}" not found in lineUsers`);
   } catch (e) {
     console.error("resolveUserId error:", e.message);
   }
