@@ -206,8 +206,17 @@ app.post("/webhook", async (req, res) => {
 
     // ─ Message event → เช็คสถานะรถ + บันทึก userId คู่กับทะเบียน
     if (event.type === "message" && event.message.type === "text") {
-      const text = event.message.text.trim();
-      const plate = text.replace(/^เช็ค\s*/i, "").trim().toUpperCase();
+      const text = event.message.text.trim().toUpperCase();
+
+// ตรวจรูปแบบทะเบียนรถ
+const plateRegex = /^[ก-ฮ]{1,3}\s?\d{1,4}$/;
+
+if (!plateRegex.test(text)) {
+  console.log("⏭️ ไม่ใช่ทะเบียนรถ → ไม่ตอบ");
+  continue;
+}
+
+const plate = text.replace(/\s+/g, "");
 
       // บันทึก userId + branchId คู่กับทะเบียนรถ
       await db.collection("lineUsers").doc(userId).set({
