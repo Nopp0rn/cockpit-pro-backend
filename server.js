@@ -228,66 +228,74 @@ app.post("/webhook", async (req, res) => {
       const stripped = text.replace(/\s/g, "").toUpperCase();
       const hasLetter = /[ก-ฮA-Z]/.test(stripped);
       const hasNumber = /[0-9]/.test(stripped);
-      const validLength = stripped.length >= 3 && stripped.length <= 10;
-      const isPlate = hasLetter && hasNumber && validLength && /^[ก-ฮA-Z0-9]+$/.test(stripped);
+      const isPlate = hasLetter && hasNumber && stripped.length >= 3 && stripped.length <= 10 && /^[ก-ฮA-Z0-9]+$/.test(stripped);
 
-      // โหลด state ของ user จาก lineUsers
-      const userRef = db.collection("lineUsers").doc(userId);
-      const userDoc = await userRef.get();
-      const userData = userDoc.exists ? userDoc.data() : {};
-
-      // ─ State: รอจังหวัด
-      if (userData.pendingPlate) {
-        const province = text.replace(/^จ\.?\s*/,"").replace(/จังหวัด/,"").trim();
-        const thaiProvinces = ["กระบี่","กรุงเทพมหานคร","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร","ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี","ชัยนาท","ชัยภูมิ","ชุมพร","เชียงราย","เชียงใหม่","ตรัง","ตราด","ตาก","นครนายก","นครปฐม","นครพนม","นครราชสีมา","นครศรีธรรมราช","นครสวรรค์","นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี","ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา","พะเยา","พังงา","พัทลุง","พิจิตร","พิษณุโลก","เพชรบุรี","เพชรบูรณ์","แพร่","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน","ยโสธร","ยะลา","ร้อยเอ็ด","ระนอง","ระยอง","ราชบุรี","ลพบุรี","ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา","สตูล","สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี","สิงห์บุรี","สุโขทัย","สุพรรณบุรี","สุราษฎร์ธานี","สุรินทร์","หนองคาย","หนองบัวลำภู","อ่างทอง","อำนาจเจริญ","อุดรธานี","อุตรดิตถ์","อุทัยธานี","อุบลราชธานี"];
-        const matchedProvince = thaiProvinces.find(p => p.includes(province) || province.includes(p.slice(0,3)));
-
-        if (matchedProvince) {
-          // บันทึก plate + province
-          const plate = userData.pendingPlate;
-          await userRef.set({ userId, plate, province: matchedProvince, branchId, updatedAt: new Date().toISOString() }, { merge: true });
-          await userRef.update({ pendingPlate: admin.firestore.FieldValue.delete() });
-
-          // ค้นหารถในระบบ
-          const allBays = await db.collectionGroup("bays")
-            .where("plate", "==", plate).where("bayStatus", "!=", "done").limit(5).get();
-
-          let matchedJob = null;
-          if (!allBays.empty) {
-            // ถ้ามีหลายคัน ให้เลือกที่ province ตรง หรือเลือกอันแรก
-            matchedJob = allBays.docs[0];
-          }
-
-          if (matchedJob) {
-            const job = matchedJob.data();
-            const branchRef = matchedJob.ref.parent.parent;
-            const branchDoc = await branchRef.get();
-            await matchedJob.ref.update({ userId });
-            await pushMessage(userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay: job.bay, bayStatus: job.bayStatus, jobs: job.jobs })], branchId);
-          } else {
-            await pushMessage(userId, [{ type: "text", text: `✅ รับทราบทะเบียน ${plate} จ.${matchedProvince} แล้วครับ\n\nเมื่อรถเข้าระบบจะแจ้งเตือนทันทีครับ 🚗` }], branchId);
-          }
-        } else {
-          // ไม่รู้จักจังหวัด → ถามใหม่
-          await pushMessage(userId, [{ type: "text", text: `ขอโทษครับ ไม่พบจังหวัด "${text}"\n\nกรุณาพิมพ์ชื่อจังหวัดเต็ม เช่น อุดรธานี, ขอนแก่น, กรุงเทพมหานคร` }], branchId);
-        }
-        continue;
-      }
-
-      // ─ ข้อความเป็นทะเบียนรถ
       if (isPlate) {
-        const plate = stripped;
-        // บันทึก pendingPlate และถามจังหวัด
-        await userRef.set({ userId, pendingPlate: plate, branchId, updatedAt: new Date().toISOString() }, { merge: true });
-        await pushMessage(userId, [{ type: "text", text: `🚗 ทะเบียน "${plate}"\n\nรถจังหวัดอะไรครับ? 🙏\n(พิมพ์ชื่อจังหวัด เช่น อุดรธานี)` }], branchId);
-        continue;
+        // ส่งลิงก์ลงทะเบียนพร้อม token
+        const token = `${userId}_${Date.now()}`;
+        await db.collection("registerTokens").doc(token).set({
+          userId, branchId, createdAt: new Date().toISOString()
+        });
+        const regUrl = `https://cockpit-pro-webapp.vercel.app/register.html?token=${token}`;
+        await pushMessage(userId, [{
+          type: "text",
+          text: `🚗 ทะเบียน "${stripped}"\n\nกรุณาลงทะเบียนเพื่อรับแจ้งเตือนสถานะรถครับ\n👇 กดลิงก์ด้านล่าง\n\n${regUrl}`
+        }], branchId);
       }
-
-      // ─ ข้อความอื่นๆ → ไม่ตอบ
-      console.log(`⏭️ Skipped: "${text}"`);
+      // ข้อความอื่น → ไม่ตอบ
     }
   }
   res.json({ status: "ok" });
+});
+
+// ─── Register API ──────────────────────────────────────────
+
+// GET ตรวจสอบ token
+app.get("/api/register/:token", async (req, res) => {
+  try {
+    const doc = await db.collection("registerTokens").doc(req.params.token).get();
+    if (!doc.exists) return res.json({ valid: false });
+    const data = doc.data();
+    // token หมดอายุหลัง 24 ชั่วโมง
+    const age = Date.now() - new Date(data.createdAt).getTime();
+    if (age > 24 * 60 * 60 * 1000) return res.json({ valid: false });
+    const branchDoc = await db.collection("branches").doc(data.branchId).get();
+    res.json({ valid: true, branchName: branchDoc.data()?.name || "Cockpit Pro" });
+  } catch (err) {
+    res.json({ valid: false });
+  }
+});
+
+// POST submit ลงทะเบียน
+app.post("/api/register/submit", async (req, res) => {
+  try {
+    const { token, plate, province, phone } = req.body;
+    if (!token || !plate || !province) return res.status(400).json({ error: "ข้อมูลไม่ครบ" });
+    const tokenDoc = await db.collection("registerTokens").doc(token).get();
+    if (!tokenDoc.exists) return res.status(400).json({ error: "Token ไม่ถูกต้อง" });
+    const { userId, branchId } = tokenDoc.data();
+    // บันทึก lineUsers
+    await db.collection("lineUsers").doc(userId).set({
+      userId, plate: plate.toUpperCase().replace(/\s/g,""),
+      province, phone, branchId,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+    // ลบ pendingPlate ถ้ามี
+    await db.collection("lineUsers").doc(userId).update({
+      pendingPlate: admin.firestore.FieldValue.delete()
+    }).catch(()=>{});
+    // ลบ token
+    await db.collection("registerTokens").doc(token).delete();
+    // แจ้งยืนยันใน LINE
+    const branchDoc = await db.collection("branches").doc(branchId).get();
+    await pushMessage(userId, [{
+      type: "text",
+      text: `✅ ลงทะเบียนสำเร็จครับ!\n\nทะเบียน: ${plate.toUpperCase()}\nจังหวัด: ${province}\n\nระบบจะแจ้งเตือนสถานะรถผ่าน LINE นี้โดยอัตโนมัติครับ 🚗`
+    }], branchId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Branch API ────────────────────────────────────────────
