@@ -218,11 +218,8 @@ app.post("/webhook", async (req, res) => {
       const isPlate = hasLetter && hasNumber && validLength && /^[ก-ฮA-Z0-9]+$/.test(stripped);
 
       if (!isPlate) {
-        // ข้อความไม่ใช่ทะเบียน → ตอบแนะนำวิธีใช้งาน
-        await pushMessage(userId, [{
-          type: "text",
-          text: `สวัสดีครับ 🙏\n\nกรุณาพิมพ์ **ทะเบียนรถ** ของคุณ เพื่อให้ระบบแจ้งเตือนสถานะการซ่อม\n\nตัวอย่าง: กข1234 หรือ 9กฌ8245`,
-        }], branchId);
+        // ไม่ใช่ทะเบียนรถ → ไม่ตอบอะไร (มีคนดูแลตอบเอง)
+        console.log(`⏭️ Skipped non-plate message: "${plate}"`);
         continue;
       }
 
