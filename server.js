@@ -90,7 +90,7 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 
   return {
     type: "flex",
-    altText: `[TirePlus] อัปเดตสถานะรถ ${plate}`,
+    altText: `[Cockpit] อัปเดตสถานะรถ ${plate}`,
     contents: {
       type: "bubble",
       size: "mega",
@@ -101,7 +101,7 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
         contents: [
           {
             type: "text",
-            text: "🚗 TirePlus – สถานะรถของคุณ",
+            text: "🚗 Cockpit – สถานะรถของคุณ",
             color: "#ffffff",
             size: "sm",
             weight: "bold",
@@ -184,7 +184,7 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
             type: "text",
             text: bayStatus === "done"
               ? "✅ รถพร้อมรับแล้ว กรุณามารับรถได้เลยครับ"
-              : "ขอบคุณที่ใช้บริการ TirePlus 🙏",
+              : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
             size: "xs",
             color: "#6b7280",
             align: "center",
@@ -224,7 +224,7 @@ app.post("/webhook", (req, res) => {
       await pushMessage(userId, [
         {
           type: "text",
-          text: "🎉 ยินดีต้อนรับสู่ TirePlus!\n\nระบบจะแจ้งเตือนสถานะรถของคุณผ่าน LINE นี้โดยอัตโนมัติครับ 🚗",
+          text: "🎉 ยินดีต้อนรับสู่ Cockpit บายพาส อุดรฯ!\n\nระบบจะแจ้งเตือนสถานะรถของคุณผ่าน LINE นี้โดยอัตโนมัติครับ 🚗",
         },
       ]);
     }
@@ -423,7 +423,7 @@ app.get("/api/admin/overview", (req, res) => {
 });
 
 // Health check
-app.get("/", (req, res) => res.json({ status: "TirePlus Backend OK 🚗", time: new Date().toISOString() }));
+app.get("/", (req, res) => res.json({ status: "Cockpit Pro Backend OK 🚗", time: new Date().toISOString() }));
 
 // ─── Helpers ───────────────────────────────────────────────
 function getDuration(jobName) {
@@ -433,4 +433,4 @@ function getDuration(jobName) {
 
 // ─── Start ─────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 TirePlus Backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Cockpit Pro Backend running on port ${PORT}`));
