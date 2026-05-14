@@ -207,7 +207,21 @@ app.post("/webhook", async (req, res) => {
     // ─ Message event → เช็คสถานะรถ + บันทึก userId คู่กับทะเบียน
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
-      const plate = text.replace(/^เช็ค\s*/i, "").trim().toUpperCase();
+      const rawPlate = text.replace(/^เช็ค\s*/i, "").trim();
+      const plate = rawPlate.toUpperCase();
+
+      // ตรวจสอบว่าข้อความเป็นทะเบียนรถหรือเปล่า
+      // ทะเบียนรถไทย: ตัวอักษร+ตัวเลข 4-10 ตัว เช่น กข1234, 9กฌ8245
+      const isPlate = /^[ก-ฮA-Z0-9]{2,10}$/.test(plate.replace(/\s/g, "")) && plate.length <= 10;
+
+      if (!isPlate) {
+        // ข้อความไม่ใช่ทะเบียน → ตอบแนะนำวิธีใช้งาน
+        await pushMessage(userId, [{
+          type: "text",
+          text: `สวัสดีครับ 🙏\n\nกรุณาพิมพ์ **ทะเบียนรถ** ของคุณ เพื่อให้ระบบแจ้งเตือนสถานะการซ่อม\n\nตัวอย่าง: กข1234 หรือ 9กฌ8245`,
+        }], branchId);
+        continue;
+      }
 
       // บันทึก userId + branchId คู่กับทะเบียนรถ
       await db.collection("lineUsers").doc(userId).set({
@@ -302,10 +316,17 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     // Auto-lookup userId จากทะเบียนรถที่ลูกค้าพิมพ์ใน LINE ไว้ก่อนหน้า
     let userId = manualUserId || null;
     if (!userId) {
-      const plateUpper = plate.toUpperCase();
-      const userSnap = await db.collection("lineUsers")
-        .where("plate", "==", plateUpper).limit(1).get();
-      if (!userSnap.empty) userId = userSnap.docs[0].data().userId;
+      const normalizedPlate = normalizePlate(plate);
+      // scan lineUsers ทั้งหมด แล้ว normalize เปรียบเทียบ
+      const allUsers = await db.collection("lineUsers").get();
+      for (const doc of allUsers.docs) {
+        const data = doc.data();
+        if (normalizePlate(data.plate) === normalizedPlate) {
+          userId = data.userId;
+          console.log(`✅ open job: found userId ${userId} for plate ${normalizedPlate}`);
+          break;
+        }
+      }
     }
 
     const jobData = {
