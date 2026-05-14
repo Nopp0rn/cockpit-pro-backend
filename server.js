@@ -291,6 +291,36 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// POST ลบงานย่อยออกจากช่อง
+app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { jobIdx } = req.body;
+    if (jobIdx === undefined) return res.status(400).json({ error: "jobIdx required" });
+
+    const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
+
+    const job = doc.data();
+    const updatedJobs = job.jobs.filter((_, i) => i !== parseInt(jobIdx));
+    if (!updatedJobs.length) return res.status(400).json({ error: "Cannot remove all jobs - must have at least 1" });
+
+    await ref.update({ jobs: updatedJobs });
+
+    if (job.userId) {
+      const branchDoc = await db.collection("branches").doc(branchId).get();
+      await pushMessage(job.userId, [buildStatusFlex({
+        plate: job.plate, branchName: branchDoc.data()?.name || branchId,
+        bay, bayStatus: job.bayStatus, jobs: updatedJobs,
+      })]);
+    }
+    res.json({ success: true, remainingJobs: updatedJobs.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
