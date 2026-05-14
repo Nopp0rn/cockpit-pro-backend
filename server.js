@@ -210,9 +210,12 @@ app.post("/webhook", async (req, res) => {
       const rawPlate = text.replace(/^เช็ค\s*/i, "").trim();
       const plate = rawPlate.toUpperCase();
 
-      // ตรวจสอบว่าข้อความเป็นทะเบียนรถหรือเปล่า
-      // ทะเบียนรถไทย: ตัวอักษร+ตัวเลข 4-10 ตัว เช่น กข1234, 9กฌ8245
-      const isPlate = /^[ก-ฮA-Z0-9]{2,10}$/.test(plate.replace(/\s/g, "")) && plate.length <= 10;
+      // ทะเบียนรถไทยต้องมีทั้งตัวอักษรและตัวเลข เช่น กข1234, 9กฌ8245
+      const stripped = plate.replace(/\s/g, "");
+      const hasLetter = /[ก-ฮA-Z]/.test(stripped);
+      const hasNumber = /[0-9]/.test(stripped);
+      const validLength = stripped.length >= 3 && stripped.length <= 10;
+      const isPlate = hasLetter && hasNumber && validLength && /^[ก-ฮA-Z0-9]+$/.test(stripped);
 
       if (!isPlate) {
         // ข้อความไม่ใช่ทะเบียน → ตอบแนะนำวิธีใช้งาน
