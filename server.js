@@ -129,10 +129,17 @@ app.post("/webhook", async (req, res) => {
       }]);
     }
 
-    // ─ Message event → เช็คสถานะรถ
+    // ─ Message event → เช็คสถานะรถ + บันทึก userId คู่กับทะเบียน
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
-      const plate = text.replace(/^เช็ค\s*/i, "").trim();
+      const plate = text.replace(/^เช็ค\s*/i, "").trim().toUpperCase();
+
+      // บันทึก userId คู่กับทะเบียนรถที่ลูกค้าพิมพ์มา
+      await db.collection("lineUsers").doc(userId).set({
+        userId,
+        plate,
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
 
       // ค้นหาทะเบียนรถใน Firestore
       const snapshot = await db.collectionGroup("bays")
@@ -148,6 +155,9 @@ app.post("/webhook", async (req, res) => {
         const branchDoc = await branchRef.get();
         const branchData = branchDoc.data();
 
+        // อัปเดต userId ใน job ด้วย เพื่อให้ส่งแจ้งเตือนได้ครั้งต่อไป
+        await doc.ref.update({ userId });
+
         await pushMessage(userId, [buildStatusFlex({
           plate: job.plate,
           branchName: branchData?.name || "Cockpit",
@@ -158,7 +168,7 @@ app.post("/webhook", async (req, res) => {
       } else {
         await pushMessage(userId, [{
           type: "text",
-          text: `ไม่พบข้อมูลรถทะเบียน "${plate}" ในระบบครับ\n\nลองพิมพ์ทะเบียนรถใหม่อีกครั้งนะครับ 🙏`,
+          text: `✅ รับทราบทะเบียน "${plate}" แล้วครับ\n\nเมื่อรถของคุณเข้าระบบ เราจะแจ้งเตือนผ่าน LINE นี้ทันทีครับ 🚗`,
         }]);
       }
     }
@@ -210,12 +220,21 @@ app.put("/api/branch/:branchId/settings", async (req, res) => {
 app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
-    const { plate, phone, userId, jobs } = req.body;
+    const { plate, phone, userId: manualUserId, jobs } = req.body;
     if (!plate || !phone || !jobs?.length) return res.status(400).json({ error: "plate, phone, jobs required" });
+
+    // Auto-lookup userId จากทะเบียนรถที่ลูกค้าพิมพ์ใน LINE ไว้ก่อนหน้า
+    let userId = manualUserId || null;
+    if (!userId) {
+      const plateUpper = plate.toUpperCase();
+      const userSnap = await db.collection("lineUsers")
+        .where("plate", "==", plateUpper).limit(1).get();
+      if (!userSnap.empty) userId = userSnap.docs[0].data().userId;
+    }
 
     const jobData = {
       id: `JOB-${Date.now()}`,
-      plate, phone,
+      plate: plate.toUpperCase(), phone,
       userId: userId || null,
       bay: parseInt(bay),
       jobs: jobs.map((j) => ({ name: j, duration: getDuration(j), status: "waiting" })),
@@ -226,14 +245,14 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
 
     await db.collection("branches").doc(branchId).collection("bays").doc(bay).set(jobData);
 
-    // แจ้ง LINE ลูกค้า
+    // แจ้ง LINE ลูกค้า (ถ้ามี userId)
     if (userId) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
       const branchName = branchDoc.data()?.name || branchId;
-      await pushMessage(userId, [buildStatusFlex({ plate, branchName, bay, bayStatus: "waiting_entry", jobs: jobData.jobs })]);
+      await pushMessage(userId, [buildStatusFlex({ plate: jobData.plate, branchName, bay, bayStatus: "waiting_entry", jobs: jobData.jobs })]);
     }
 
-    res.json({ success: true, job: jobData });
+    res.json({ success: true, job: jobData, lineNotified: !!userId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
