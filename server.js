@@ -250,7 +250,47 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   }
 });
 
-// POST รถเข้าช่องบริการ
+// POST เพิ่มงานในช่องที่มีรถอยู่แล้ว
+app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { jobs: newJobNames } = req.body;
+    if (!newJobNames?.length) return res.status(400).json({ error: "jobs required" });
+
+    const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
+
+    const job = doc.data();
+    const existingNames = job.jobs.map(j => j.name);
+
+    // เพิ่มเฉพาะงานที่ยังไม่มี
+    const toAdd = newJobNames
+      .filter(name => !existingNames.includes(name))
+      .map(name => ({ name, duration: getDuration(name), status: "waiting" }));
+
+    if (!toAdd.length) return res.status(400).json({ error: "All jobs already exist" });
+
+    const updatedJobs = [...job.jobs, ...toAdd];
+    await ref.update({ jobs: updatedJobs });
+
+    // แจ้ง LINE ลูกค้า
+    if (job.userId) {
+      const branchDoc = await db.collection("branches").doc(branchId).get();
+      await pushMessage(job.userId, [buildStatusFlex({
+        plate: job.plate,
+        branchName: branchDoc.data()?.name || branchId,
+        bay,
+        bayStatus: job.bayStatus,
+        jobs: updatedJobs,
+      })]);
+    }
+
+    res.json({ success: true, addedJobs: toAdd.map(j=>j.name) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
@@ -315,6 +355,48 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
     await ref.update({ lineNotified: true });
 
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST เพิ่มงานในช่องที่มีรถอยู่แล้ว
+app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { jobs: newJobNames } = req.body;
+    if (!newJobNames?.length) return res.status(400).json({ error: "jobs required" });
+
+    const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
+
+    const job = doc.data();
+    const existingNames = job.jobs.map(j => j.name);
+
+    // เพิ่มเฉพาะงานที่ยังไม่มี
+    const toAdd = newJobNames
+      .filter(name => !existingNames.includes(name))
+      .map(name => ({ name, duration: getDuration(name), status: "waiting" }));
+
+    if (!toAdd.length) return res.status(400).json({ error: "All jobs already exist" });
+
+    const updatedJobs = [...job.jobs, ...toAdd];
+    await ref.update({ jobs: updatedJobs });
+
+    // แจ้ง LINE ลูกค้า
+    if (job.userId) {
+      const branchDoc = await db.collection("branches").doc(branchId).get();
+      await pushMessage(job.userId, [buildStatusFlex({
+        plate: job.plate,
+        branchName: branchDoc.data()?.name || branchId,
+        bay,
+        bayStatus: job.bayStatus,
+        jobs: updatedJobs,
+      })]);
+    }
+
+    res.json({ success: true, addedJobs: toAdd.map(j => j.name), totalJobs: updatedJobs.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
