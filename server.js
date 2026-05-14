@@ -119,11 +119,11 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
   const jobRows = jobs.map((j) => ({
     type: "box", layout: "horizontal",
     contents: [
-      { type: "text", text: j.status === "done" ? "✅" : j.status === "in_progress" ? "🔧" : "⏳", size: "sm", flex: 0 },
-      { type: "text", text: j.name, size: "sm", color: j.status === "done" ? "#9ca3af" : "#111827", decoration: j.status === "done" ? "line-through" : "none", flex: 3, margin: "sm" },
-      { type: "text", text: `${j.duration} นาที`, size: "xs", color: "#9ca3af", align: "end", flex: 2 },
+      { type: "text", text: j.status === "done" ? "✅" : j.status === "in_progress" ? "🔧" : "⏳", size: "md", flex: 0 },
+      { type: "text", text: j.name, size: "md", color: j.status === "done" ? "#9ca3af" : "#111827", decoration: j.status === "done" ? "line-through" : "none", flex: 3, margin: "sm", weight: j.status === "in_progress" ? "bold" : "regular" },
+      { type: "text", text: `${j.duration} นาที`, size: "sm", color: "#9ca3af", align: "end", flex: 2 },
     ],
-    margin: "sm",
+    margin: "md",
   }));
 
   return {
@@ -134,36 +134,36 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
       header: {
         type: "box", layout: "vertical", backgroundColor: "#1A1A1A",
         contents: [
-          { type: "text", text: "🚗 Cockpit Pro – สถานะรถของคุณ", color: "#FFE000", size: "sm", weight: "bold" },
-          { type: "text", text: plate, color: "#FFFFFF", size: "xxl", weight: "bold", margin: "xs" },
-          { type: "text", text: `${branchName} · ช่องที่ ${bay}${provinceText}`, color: "#9ca3af", size: "xs" },
+          { type: "text", text: "🚗 Cockpit Pro – สถานะรถของคุณ", color: "#FFE000", size: "md", weight: "bold" },
+          { type: "text", text: plate, color: "#FFFFFF", size: "3xl", weight: "bold", margin: "sm" },
+          { type: "text", text: `${branchName} · ช่องที่ ${bay}${provinceText}`, color: "#aaaaaa", size: "sm", margin: "xs" },
         ],
-        paddingAll: "20px",
+        paddingAll: "22px",
       },
       body: {
         type: "box", layout: "vertical",
         contents: [
           { type: "box", layout: "horizontal", contents: [
-            { type: "text", text: statusLabel, size: "sm", weight: "bold", color: "#1A1A1A", flex: 3 },
-            { type: "text", text: `${progress}%`, size: "sm", weight: "bold", color: "#1A1A1A", align: "end", flex: 1 },
+            { type: "text", text: statusLabel, size: "lg", weight: "bold", color: "#1A1A1A", flex: 3 },
+            { type: "text", text: `${progress}%`, size: "lg", weight: "bold", color: "#1A1A1A", align: "end", flex: 1 },
           ]},
-          { type: "box", layout: "vertical", backgroundColor: "#f3f4f6", cornerRadius: "99px", height: "8px", margin: "sm",
-            contents: [{ type: "box", layout: "vertical", backgroundColor: "#FFE000", cornerRadius: "99px", height: "8px", width: `${progress}%`, contents: [] }]
+          { type: "box", layout: "vertical", backgroundColor: "#f3f4f6", cornerRadius: "99px", height: "10px", margin: "md",
+            contents: [{ type: "box", layout: "vertical", backgroundColor: "#FFE000", cornerRadius: "99px", height: "10px", width: `${progress}%`, contents: [] }]
           },
-          { type: "separator", margin: "md" },
-          { type: "text", text: "รายการงาน", size: "xs", color: "#9ca3af", margin: "md", weight: "bold" },
+          { type: "separator", margin: "lg" },
+          { type: "text", text: "รายการงาน", size: "sm", color: "#9ca3af", margin: "lg", weight: "bold" },
           ...jobRows,
         ],
-        paddingAll: "20px",
+        paddingAll: "22px",
       },
       footer: {
         type: "box", layout: "vertical", backgroundColor: "#f9fafb",
         contents: [{
           type: "text",
           text: bayStatus === "done" ? "✅ รถพร้อมรับแล้ว กรุณามารับรถได้เลยครับ" : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
-          size: "xs", color: "#6b7280", align: "center", wrap: true,
+          size: "md", color: "#374151", align: "center", wrap: true, weight: "bold",
         }],
-        paddingAll: "12px",
+        paddingAll: "16px",
       },
     },
   };
