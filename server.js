@@ -12,7 +12,16 @@ admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
 // ─── Middleware ────────────────────────────────────────────
-app.use(cors());
+app.use(cors({
+  origin: [
+    /\.vercel\.app$/,
+    /\.onrender\.com$/,
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ],
+  methods: ["GET","POST","PUT","PATCH","DELETE"],
+  credentials: true,
+}));
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
@@ -166,11 +175,19 @@ app.get("/api/branch/:branchId", async (req, res) => {
     const branchDoc = await db.collection("branches").doc(branchId).get();
     if (!branchDoc.exists) return res.status(404).json({ error: "Branch not found" });
 
+    const branchInfo = branchDoc.data();
     const baysSnap = await db.collection("branches").doc(branchId).collection("bays").get();
-    const bays = {};
-    baysSnap.forEach((doc) => { bays[doc.id] = doc.data(); });
+    const baysData = {};
+    baysSnap.forEach((doc) => { baysData[doc.id] = doc.data(); });
 
-    res.json({ id: branchId, ...branchDoc.data(), bays });
+    // ส่ง totalBays แยกจาก baysData เพื่อไม่ให้ทับกัน
+    res.json({
+      id: branchId,
+      name: branchInfo.name,
+      lineOA: branchInfo.lineOA,
+      totalBays: branchInfo.bays || 8,  // จำนวนช่องซ่อม
+      baysData,                          // ข้อมูลช่องที่มีงาน
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -181,8 +198,9 @@ app.put("/api/branch/:branchId/settings", async (req, res) => {
   try {
     const { branchId } = req.params;
     const { bays } = req.body;
+    // บันทึก bays (จำนวนช่อง) ลงใน Firestore
     await db.collection("branches").doc(branchId).set({ bays }, { merge: true });
-    res.json({ success: true, branchId, bays });
+    res.json({ success: true, branchId, totalBays: bays });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
