@@ -462,17 +462,22 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     const job = doc.data();
     const updatedJobs = [...job.jobs];
     updatedJobs[parseInt(jobIdx)].status = status;
-
     await ref.update({ jobs: updatedJobs, bayStatus: "in_service" });
 
-    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
-    const resolved = await resolveUserId({ ...job, _ref: ref });
-    if (resolved) {
-      const useBranchId = resolved.branchId || branchId;
-      const branchDoc = await db.collection("branches").doc(useBranchId).get();
-      await pushMessage(resolved.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "in_service", jobs: updatedJobs })], useBranchId);
-    }
+    // ตอบ frontend ทันที ไม่รอ LINE
     res.json({ success: true });
+
+    // ส่ง LINE ใน background
+    resolveUserId({ ...job, _ref: ref }).then(resolved => {
+      if (!resolved) return;
+      const useBranchId = resolved.branchId || branchId;
+      db.collection("branches").doc(useBranchId).get().then(branchDoc => {
+        pushMessage(resolved.userId, [buildStatusFlex({
+          plate: job.plate, branchName: branchDoc.data()?.name,
+          bay, bayStatus: "in_service", jobs: updatedJobs
+        })], useBranchId);
+      });
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -555,22 +560,26 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     const job = doc.data();
     const doneJobs = job.jobs.map((j) => ({ ...j, status: "done" }));
 
-    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
-    const resolvedUserId = await resolveUserId({ ...job, _ref: ref });
-    if (resolvedUserId) {
-      const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(resolvedUserId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "done", jobs: doneJobs })], branchId);
-    }
-
-    // ลบข้อมูลออกจาก Firestore (ช่องว่าง)
+    // ลบข้อมูลออกจาก Firestore ทันที
     await ref.delete();
-
-    // เก็บประวัติงานที่ปิดแล้ว
     await db.collection("branches").doc(branchId).collection("history").add({
       ...job, jobs: doneJobs, closedAt: new Date().toISOString(),
     });
 
+    // ตอบ frontend ทันที ไม่รอ LINE
     res.json({ success: true, message: `Bay ${bay} cleared` });
+
+    // ส่ง LINE ใน background
+    resolveUserId({ ...job }).then(resolved => {
+      if (!resolved) return;
+      const useBranchId = resolved.branchId || branchId;
+      db.collection("branches").doc(useBranchId).get().then(branchDoc => {
+        pushMessage(resolved.userId, [buildStatusFlex({
+          plate: job.plate, branchName: branchDoc.data()?.name,
+          bay, bayStatus: "done", jobs: doneJobs
+        })], useBranchId);
+      });
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
