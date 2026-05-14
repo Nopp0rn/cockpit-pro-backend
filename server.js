@@ -71,30 +71,30 @@ function normalizePlate(plate) {
 }
 
 async function resolveUserId(job) {
-  if (job.userId) return { userId: job.userId, branchId: cleanBranchId(job.branchId) };
+  if (job.userId) return { userId: job.userId, branchId: cleanBranchId(job.branchId), province: job.province || "" };
   if (!job.plate) return null;
   const normalizedPlate = normalizePlate(job.plate);
   try {
-    // ค้นหาทุก lineUsers แล้ว filter ด้วย normalized plate
     const snap = await db.collection("lineUsers").get();
     for (const doc of snap.docs) {
       const data = doc.data();
       if (normalizePlate(data.plate) === normalizedPlate) {
         const userId = data.userId;
         const userBranchId = cleanBranchId(data.branchId || job.branchId);
-        if (job._ref) await job._ref.update({ userId, branchId: userBranchId });
-        console.log(`✅ resolveUserId: ${normalizedPlate} → ${userId} via ${userBranchId}`);
-        return { userId, branchId: userBranchId };
+        const province = data.province || "";
+        if (job._ref) await job._ref.update({ userId, branchId: userBranchId, province });
+        console.log(`✅ resolveUserId: ${normalizedPlate} → ${userId} via ${userBranchId} จ.${province}`);
+        return { userId, branchId: userBranchId, province };
       }
     }
-    console.log(`❌ resolveUserId: plate "${normalizedPlate}" not found in lineUsers`);
+    console.log(`❌ resolveUserId: plate "${normalizedPlate}" not found`);
   } catch (e) {
     console.error("resolveUserId error:", e.message);
   }
   return null;
 }
 
-function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
+function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) {
   const doneCount = jobs.filter((j) => j.status === "done").length;
   const progress = Math.round((doneCount / jobs.length) * 100);
   const statusLabel = {
@@ -102,6 +102,8 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
     in_service: "🔧 กำลังดำเนินการ",
     done: "✅ เสร็จเรียบร้อย",
   }[bayStatus] || "กำลังดำเนินการ";
+
+  const provinceText = province ? ` จ.${province}` : "";
 
   const jobRows = jobs.map((j) => ({
     type: "box", layout: "horizontal",
@@ -115,7 +117,7 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 
   return {
     type: "flex",
-    altText: `[Cockpit] อัปเดตสถานะรถ ${plate}`,
+    altText: `[Cockpit] อัปเดตสถานะรถ ${plate}${provinceText}`,
     contents: {
       type: "bubble", size: "mega",
       header: {
@@ -123,7 +125,7 @@ function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
         contents: [
           { type: "text", text: "🚗 Cockpit Pro – สถานะรถของคุณ", color: "#FFE000", size: "sm", weight: "bold" },
           { type: "text", text: plate, color: "#FFFFFF", size: "xxl", weight: "bold", margin: "xs" },
-          { type: "text", text: `${branchName} · ช่องที่ ${bay}`, color: "#9ca3af", size: "xs" },
+          { type: "text", text: `${branchName} · ช่องที่ ${bay}${provinceText}`, color: "#9ca3af", size: "xs" },
         ],
         paddingAll: "20px",
       },
@@ -209,63 +211,69 @@ app.post("/webhook", async (req, res) => {
       }], branchId);
     }
 
-    // ─ Message event → เช็คสถานะรถ + บันทึก userId คู่กับทะเบียน
+    // ─ Message event
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
-      const rawPlate = text.replace(/^เช็ค\s*/i, "").trim();
-      const plate = rawPlate.toUpperCase();
-
-      // ทะเบียนรถไทยต้องมีทั้งตัวอักษรและตัวเลข เช่น กข1234, 9กฌ8245
-      const stripped = plate.replace(/\s/g, "");
+      const stripped = text.replace(/\s/g, "").toUpperCase();
       const hasLetter = /[ก-ฮA-Z]/.test(stripped);
       const hasNumber = /[0-9]/.test(stripped);
       const validLength = stripped.length >= 3 && stripped.length <= 10;
       const isPlate = hasLetter && hasNumber && validLength && /^[ก-ฮA-Z0-9]+$/.test(stripped);
 
-      if (!isPlate) {
-        // ไม่ใช่ทะเบียนรถ → ไม่ตอบอะไร (มีคนดูแลตอบเอง)
-        console.log(`⏭️ Skipped non-plate message: "${plate}"`);
+      // โหลด state ของ user จาก lineUsers
+      const userRef = db.collection("lineUsers").doc(userId);
+      const userDoc = await userRef.get();
+      const userData = userDoc.exists ? userDoc.data() : {};
+
+      // ─ State: รอจังหวัด
+      if (userData.pendingPlate) {
+        const province = text.replace(/^จ\.?\s*/,"").replace(/จังหวัด/,"").trim();
+        const thaiProvinces = ["กระบี่","กรุงเทพมหานคร","กาญจนบุรี","กาฬสินธุ์","กำแพงเพชร","ขอนแก่น","จันทบุรี","ฉะเชิงเทรา","ชลบุรี","ชัยนาท","ชัยภูมิ","ชุมพร","เชียงราย","เชียงใหม่","ตรัง","ตราด","ตาก","นครนายก","นครปฐม","นครพนม","นครราชสีมา","นครศรีธรรมราช","นครสวรรค์","นนทบุรี","นราธิวาส","น่าน","บึงกาฬ","บุรีรัมย์","ปทุมธานี","ประจวบคีรีขันธ์","ปราจีนบุรี","ปัตตานี","พระนครศรีอยุธยา","พะเยา","พังงา","พัทลุง","พิจิตร","พิษณุโลก","เพชรบุรี","เพชรบูรณ์","แพร่","ภูเก็ต","มหาสารคาม","มุกดาหาร","แม่ฮ่องสอน","ยโสธร","ยะลา","ร้อยเอ็ด","ระนอง","ระยอง","ราชบุรี","ลพบุรี","ลำปาง","ลำพูน","เลย","ศรีสะเกษ","สกลนคร","สงขลา","สตูล","สมุทรปราการ","สมุทรสงคราม","สมุทรสาคร","สระแก้ว","สระบุรี","สิงห์บุรี","สุโขทัย","สุพรรณบุรี","สุราษฎร์ธานี","สุรินทร์","หนองคาย","หนองบัวลำภู","อ่างทอง","อำนาจเจริญ","อุดรธานี","อุตรดิตถ์","อุทัยธานี","อุบลราชธานี"];
+        const matchedProvince = thaiProvinces.find(p => p.includes(province) || province.includes(p.slice(0,3)));
+
+        if (matchedProvince) {
+          // บันทึก plate + province
+          const plate = userData.pendingPlate;
+          await userRef.set({ userId, plate, province: matchedProvince, branchId, updatedAt: new Date().toISOString() }, { merge: true });
+          await userRef.update({ pendingPlate: admin.firestore.FieldValue.delete() });
+
+          // ค้นหารถในระบบ
+          const allBays = await db.collectionGroup("bays")
+            .where("plate", "==", plate).where("bayStatus", "!=", "done").limit(5).get();
+
+          let matchedJob = null;
+          if (!allBays.empty) {
+            // ถ้ามีหลายคัน ให้เลือกที่ province ตรง หรือเลือกอันแรก
+            matchedJob = allBays.docs[0];
+          }
+
+          if (matchedJob) {
+            const job = matchedJob.data();
+            const branchRef = matchedJob.ref.parent.parent;
+            const branchDoc = await branchRef.get();
+            await matchedJob.ref.update({ userId });
+            await pushMessage(userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay: job.bay, bayStatus: job.bayStatus, jobs: job.jobs })], branchId);
+          } else {
+            await pushMessage(userId, [{ type: "text", text: `✅ รับทราบทะเบียน ${plate} จ.${matchedProvince} แล้วครับ\n\nเมื่อรถเข้าระบบจะแจ้งเตือนทันทีครับ 🚗` }], branchId);
+          }
+        } else {
+          // ไม่รู้จักจังหวัด → ถามใหม่
+          await pushMessage(userId, [{ type: "text", text: `ขอโทษครับ ไม่พบจังหวัด "${text}"\n\nกรุณาพิมพ์ชื่อจังหวัดเต็ม เช่น อุดรธานี, ขอนแก่น, กรุงเทพมหานคร` }], branchId);
+        }
         continue;
       }
 
-      // บันทึก userId + branchId คู่กับทะเบียนรถ
-      await db.collection("lineUsers").doc(userId).set({
-        userId, plate, branchId,
-        updatedAt: new Date().toISOString(),
-      }, { merge: true });
-
-      // ค้นหาทะเบียนรถใน Firestore (เฉพาะสาขานี้ก่อน ถ้าไม่เจอค่อยหาทั้งหมด)
-      let snapshot = await db.collection("branches").doc(branchId).collection("bays")
-        .where("plate", "==", plate).where("bayStatus", "!=", "done").limit(1).get();
-
-      if(snapshot.empty) {
-        // ถ้าไม่เจอในสาขานี้ ค้นหาทุกสาขา
-        snapshot = await db.collectionGroup("bays")
-          .where("plate", "==", plate).where("bayStatus", "!=", "done").limit(1).get();
+      // ─ ข้อความเป็นทะเบียนรถ
+      if (isPlate) {
+        const plate = stripped;
+        // บันทึก pendingPlate และถามจังหวัด
+        await userRef.set({ userId, pendingPlate: plate, branchId, updatedAt: new Date().toISOString() }, { merge: true });
+        await pushMessage(userId, [{ type: "text", text: `🚗 ทะเบียน "${plate}"\n\nรถจังหวัดอะไรครับ? 🙏\n(พิมพ์ชื่อจังหวัด เช่น อุดรธานี)` }], branchId);
+        continue;
       }
 
-      if (!snapshot.empty) {
-        const doc = snapshot.docs[0];
-        const job = doc.data();
-        const branchRef = doc.ref.parent.parent;
-        const branchDoc = await branchRef.get();
-        const jobBranchId = branchRef.id;
-
-        await doc.ref.update({ userId });
-
-        await pushMessage(userId, [buildStatusFlex({
-          plate: job.plate,
-          branchName: branchDoc.data()?.name || "Cockpit",
-          bay: job.bay,
-          bayStatus: job.bayStatus,
-          jobs: job.jobs,
-        })], branchId);
-      } else {
-        await pushMessage(userId, [{
-          type: "text",
-          text: `✅ รับทราบทะเบียน "${plate}" แล้วครับ\n\nเมื่อรถของคุณเข้าระบบ เราจะแจ้งเตือนผ่าน LINE นี้ทันทีครับ 🚗`,
-        }], branchId);
-      }
+      // ─ ข้อความอื่นๆ → ไม่ตอบ
+      console.log(`⏭️ Skipped: "${text}"`);
     }
   }
   res.json({ status: "ok" });
@@ -315,7 +323,7 @@ app.put("/api/branch/:branchId/settings", async (req, res) => {
 app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
-    const { plate, phone, userId: manualUserId, jobs } = req.body;
+    const { plate, phone, province, userId: manualUserId, jobs } = req.body;
     if (!plate || !phone || !jobs?.length) return res.status(400).json({ error: "plate, phone, jobs required" });
 
     // Auto-lookup userId จากทะเบียนรถที่ลูกค้าพิมพ์ใน LINE ไว้ก่อนหน้า
@@ -337,6 +345,7 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     const jobData = {
       id: `JOB-${Date.now()}`,
       plate: plate.toUpperCase(), phone,
+      province: province || "",
       userId: userId || null,
       bay: parseInt(bay),
       jobs: jobs.map((j) => ({ name: j, duration: getDuration(j), status: "waiting" })),
