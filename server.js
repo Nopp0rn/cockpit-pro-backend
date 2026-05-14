@@ -59,6 +59,11 @@ async function pushMessage(userId, messages, branchId="BR107") {
 // ─── Flex Message Builder ──────────────────────────────────
 
 // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+function cleanBranchId(id) {
+  if (!id) return "BR107";
+  return id.replace(/[^\w]/g, "").toUpperCase();
+}
+
 function normalizePlate(plate) {
   if (!plate) return "";
   // Normalize Unicode และลบช่องว่าง แปลงเป็นตัวพิมพ์ใหญ่
