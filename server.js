@@ -12,16 +12,8 @@ admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
 // ─── Middleware ────────────────────────────────────────────
-app.use(cors({
-  origin: [
-    /\.vercel\.app$/,
-    /\.onrender\.com$/,
-    "http://localhost:5173",
-    "http://localhost:3000",
-  ],
-  methods: ["GET","POST","PUT","PATCH","DELETE"],
-  credentials: true,
-}));
+app.use(cors({ origin: "*", methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }));
+app.options("*", cors());
 app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
