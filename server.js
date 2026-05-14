@@ -59,8 +59,14 @@ async function pushMessage(userId, messages, branchId="BR107") {
 // ─── Flex Message Builder ──────────────────────────────────
 
 // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+function cleanBranchId(id) {
+  if (!id) return id;
+  // ลบอักขระพิเศษที่ไม่ใช่ตัวอักษรและตัวเลข
+  return id.replace(/[^\w]/g, "").toUpperCase();
+}
+
 async function resolveUserId(job) {
-  if (job.userId) return { userId: job.userId, branchId: job.branchId };
+  if (job.userId) return { userId: job.userId, branchId: cleanBranchId(job.branchId) };
   if (!job.plate) return null;
   try {
     const snap = await db.collection("lineUsers")
@@ -68,9 +74,8 @@ async function resolveUserId(job) {
     if (!snap.empty) {
       const data = snap.docs[0].data();
       const userId = data.userId;
-      const userBranchId = data.branchId || job.branchId;
-      // บันทึก userId กลับเข้า job เพื่อใช้ครั้งต่อไป
-      if (job._ref) await job._ref.update({ userId });
+      const userBranchId = cleanBranchId(data.branchId || job.branchId);
+      if (job._ref) await job._ref.update({ userId, branchId: userBranchId });
       return { userId, branchId: userBranchId };
     }
   } catch (e) {
