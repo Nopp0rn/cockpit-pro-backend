@@ -57,6 +57,28 @@ async function pushMessage(userId, messages, branchId="BR107") {
 }
 
 // ─── Flex Message Builder ──────────────────────────────────
+
+// Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+async function resolveUserId(job) {
+  if (job.userId) return { userId: job.userId, branchId: job.branchId };
+  if (!job.plate) return null;
+  try {
+    const snap = await db.collection("lineUsers")
+      .where("plate", "==", job.plate.toUpperCase()).limit(1).get();
+    if (!snap.empty) {
+      const data = snap.docs[0].data();
+      const userId = data.userId;
+      const userBranchId = data.branchId || job.branchId;
+      // บันทึก userId กลับเข้า job เพื่อใช้ครั้งต่อไป
+      if (job._ref) await job._ref.update({ userId });
+      return { userId, branchId: userBranchId };
+    }
+  } catch (e) {
+    console.error("resolveUserId error:", e.message);
+  }
+  return null;
+}
+
 function buildStatusFlex({ plate, branchName, bay, bayStatus, jobs }) {
   const doneCount = jobs.filter((j) => j.status === "done").length;
   const progress = Math.round((doneCount / jobs.length) * 100);
@@ -361,9 +383,10 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
 
     await ref.update({ jobs: updatedJobs });
 
-    if (job.userId) {
+    const resolvedUserId3 = await resolveUserId({ ...job, _ref: ref });
+    if (resolvedUserId3) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(job.userId, [buildStatusFlex({
+      await pushMessage(resolvedUserId3, [buildStatusFlex({
         plate: job.plate, branchName: branchDoc.data()?.name || branchId,
         bay, bayStatus: job.bayStatus, jobs: updatedJobs,
       })], branchId);
@@ -411,9 +434,12 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
 
     await ref.update({ jobs: updatedJobs, bayStatus: "in_service" });
 
-    if (job.userId) {
-      const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(job.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "in_service", jobs: updatedJobs })], branchId);
+    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+    const resolved = await resolveUserId({ ...job, _ref: ref });
+    if (resolved) {
+      const useBranchId = resolved.branchId || branchId;
+      const branchDoc = await db.collection("branches").doc(useBranchId).get();
+      await pushMessage(resolved.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "in_service", jobs: updatedJobs })], useBranchId);
     }
     res.json({ success: true });
   } catch (err) {
@@ -430,11 +456,14 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
     if (!doc.exists) return res.status(404).json({ error: "No job" });
 
     const job = doc.data();
-    if (!job.userId) return res.status(400).json({ error: "No LINE userId" });
+    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+    const resolved = await resolveUserId({ ...job, _ref: ref });
+    if (!resolved) return res.status(400).json({ error: "No LINE userId - ลูกค้ายังไม่ได้พิมพ์ทะเบียนใน LINE" });
 
-    const branchDoc = await db.collection("branches").doc(branchId).get();
-    await pushMessage(job.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: job.bayStatus, jobs: job.jobs })], branchId);
-    await ref.update({ lineNotified: true });
+    const useBranchId = resolved.branchId || branchId;
+    const branchDoc = await db.collection("branches").doc(useBranchId).get();
+    await pushMessage(resolved.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: job.bayStatus, jobs: job.jobs })], useBranchId);
+    await ref.update({ lineNotified: true, userId: resolved.userId });
 
     res.json({ success: true });
   } catch (err) {
@@ -495,9 +524,11 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     const job = doc.data();
     const doneJobs = job.jobs.map((j) => ({ ...j, status: "done" }));
 
-    if (job.userId) {
+    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
+    const resolvedUserId = await resolveUserId({ ...job, _ref: ref });
+    if (resolvedUserId) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(job.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "done", jobs: doneJobs })], branchId);
+      await pushMessage(resolvedUserId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "done", jobs: doneJobs })], branchId);
     }
 
     // ลบข้อมูลออกจาก Firestore (ช่องว่าง)
