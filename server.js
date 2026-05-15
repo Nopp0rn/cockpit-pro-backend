@@ -148,7 +148,7 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
         type: "box", layout: "vertical", backgroundColor: "#f9fafb",
         contents: [{
           type: "text",
-          text: bayStatus === "done" ? "✅ รถพร้อมรับแล้ว กรุณามารับรถได้เลยครับ" : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
+          text: bayStatus === "done" ? "✅ "งานเสร็จเรียบร้อย หากท่านอยู่ในสาขากรุณารอสักครู่ พนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ"" : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
           size: "md", color: "#374151", align: "center", wrap: true, weight: "bold",
         }],
         paddingAll: "16px",
