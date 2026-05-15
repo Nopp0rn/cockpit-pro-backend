@@ -148,7 +148,7 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
         type: "box", layout: "vertical", backgroundColor: "#f9fafb",
         contents: [{
           type: "text",
-          text: bayStatus === "done" ? "✅ "งานเสร็จเรียบร้อย หากท่านอยู่ในสาขากรุณารอสักครู่ พนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ"" : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
+          text: bayStatus === "done" ? "งานเสร็จเรียบร้อย หากท่านอยู่ในสาขากรุณารอสักครู่ พนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ" : "ขอบคุณที่ใช้บริการ Cockpit 🙏",
           size: "md", color: "#374151", align: "center", wrap: true, weight: "bold",
         }],
         paddingAll: "16px",
@@ -261,11 +261,36 @@ app.post("/api/register/submit", async (req, res) => {
       pendingPlate: admin.firestore.FieldValue.delete()
     }).catch(()=>{});
     await db.collection("registerTokens").doc(token).delete();
-    const branchDoc = await db.collection("branches").doc(branchId).get();
-    await pushMessage(userId, [{
-      type: "text",
-      text: `✅ ลงทะเบียนสำเร็จครับ!\n\nทะเบียน: ${plate.toUpperCase()}\nจังหวัด: ${province}\n\nระบบจะแจ้งเตือนสถานะรถผ่าน LINE นี้โดยอัตโนมัติครับ 🚗`
-    }], branchId);
+    // Auto-create queue entry when customer registers
+    try {
+      const bSnap = await db.collection("branches").doc(branchId).collection("bays").get();
+      const taken = new Set(bSnap.docs.map(d => parseInt(d.id)));
+      let nextBay = null;
+      for (let i = 1; i <= 20; i++) { if (!taken.has(i)) { nextBay = i; break; } }
+      const bDoc = await db.collection("branches").doc(branchId).get();
+      const bName = bDoc.data()?.name || branchId;
+      if (nextBay) {
+        const jobData = {
+          id: `JOB-${Date.now()}`,
+          plate: plate.toUpperCase().replace(/\s/g, ""),
+          phone: phone || "-", province: province || "",
+          userId, bay: nextBay,
+          jobs: [{ name: "รับรถเข้า", duration: 5, status: "waiting" }],
+          bayStatus: "waiting_entry",
+          startTime: new Date().toISOString(), branchId,
+        };
+        await db.collection("branches").doc(branchId).collection("bays").doc(String(nextBay)).set(jobData);
+        await pushMessage(userId, [buildStatusFlex({
+          plate: jobData.plate, branchName: bName, bay: nextBay,
+          bayStatus: "waiting_entry", jobs: jobData.jobs, province: province || ""
+        })], branchId);
+        console.log(`✅ Auto-queue: ${plate} → bay ${nextBay} @ ${branchId}`);
+      } else {
+        await pushMessage(userId, [{ type: "text",
+          text: `✅ ลงทะเบียนสำเร็จครับ!\n\nทะเบียน: ${plate.toUpperCase()}\nจังหวัด: ${province}\n\n⏳ พนักงานจะเรียกท่านเข้าคิวเร็วๆ นี้ครับ 🚗`
+        }], branchId);
+      }
+    } catch (e) { console.error("Auto-queue error:", e.message); }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
