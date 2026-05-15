@@ -18,8 +18,6 @@ app.use("/webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
 // ─── LINE Multi-Branch Config ──────────────────────────────
-// อ่าน token/secret จาก env แบบ LINE_TOKEN_BR107, LINE_SECRET_BR107
-// ถ้าไม่มี branchId-specific ให้ fallback ไปใช้ LINE_CHANNEL_ACCESS_TOKEN เดิม
 function getBranchToken(branchId) {
   return process.env[`LINE_TOKEN_${branchId}`] || process.env.LINE_CHANNEL_ACCESS_TOKEN;
 }
@@ -27,16 +25,13 @@ function getBranchSecret(branchId) {
   return process.env[`LINE_SECRET_${branchId}`] || process.env.LINE_CHANNEL_SECRET;
 }
 
-// หา branchId จาก Channel Secret (ใช้ตอน Webhook เข้ามา)
 function getBranchIdFromSecret(secret) {
   const env = process.env;
-  // หาจาก LINE_SECRET_BRxxx
   for(const key of Object.keys(env)) {
     if(key.startsWith("LINE_SECRET_") && env[key] === secret) {
       return key.replace("LINE_SECRET_", "");
     }
   }
-  // fallback: ถ้าตรงกับ secret เดิม = BR107
   if(secret === process.env.LINE_CHANNEL_SECRET) return "BR107";
   return null;
 }
@@ -57,8 +52,6 @@ async function pushMessage(userId, messages, branchId="BR107") {
 }
 
 // ─── Flex Message Builder ──────────────────────────────────
-
-// Auto-lookup userId จาก plate ถ้า job.userId เป็น null
 function cleanBranchId(id) {
   if (!id) return "BR107";
   return id.replace(/[^\w]/g, "").toUpperCase();
@@ -66,7 +59,6 @@ function cleanBranchId(id) {
 
 function normalizePlate(plate) {
   if (!plate) return "";
-  // Normalize Unicode และลบช่องว่าง แปลงเป็นตัวพิมพ์ใหญ่
   return plate.normalize("NFC").replace(/\s+/g, "").toUpperCase();
 }
 
@@ -81,18 +73,14 @@ async function resolveUserId(job) {
     for (const doc of snap.docs) {
       const data = doc.data();
       if (normalizePlate(data.plate) !== normalizedPlate) continue;
-
-      // ถ้ามีจังหวัดทั้งสองฝั่ง ต้องตรงกัน
       const userProvince = (data.province || "").trim();
       if (jobProvince && userProvince && jobProvince !== userProvince) {
         console.log(`⏭️ Plate match but province mismatch: job=${jobProvince} user=${userProvince}`);
-        continue; // ข้ามถ้าจังหวัดไม่ตรง
+        continue;
       }
-
       bestMatch = { userId: data.userId, branchId: cleanBranchId(data.branchId || job.branchId), province: userProvince };
       break;
     }
-
     if (bestMatch) {
       if (job._ref) await job._ref.update({ userId: bestMatch.userId, branchId: bestMatch.branchId, province: bestMatch.province });
       console.log(`✅ resolveUserId: ${normalizedPlate} จ.${bestMatch.province} → ${bestMatch.userId}`);
@@ -180,7 +168,6 @@ app.post("/webhook", async (req, res) => {
   const signature = req.headers["x-line-signature"];
   const bodyBuf = req.body;
 
-  // ตรวจสอบว่า Webhook มาจากสาขาไหนโดยเทียบ Secret ทุกสาขา
   let branchId = null;
   const env = process.env;
   const lineSecretKeys = Object.keys(env).filter(k => k.startsWith("LINE_SECRET_"));
@@ -195,7 +182,6 @@ app.post("/webhook", async (req, res) => {
       break;
     }
   }
-  // fallback สำหรับ LINE_CHANNEL_SECRET เดิม
   if(!branchId && process.env.LINE_CHANNEL_SECRET) {
     const hash = crypto.createHmac("sha256", process.env.LINE_CHANNEL_SECRET).update(bodyBuf).digest("base64");
     if(hash === signature) branchId = "BR107";
@@ -212,7 +198,6 @@ app.post("/webhook", async (req, res) => {
   for (const event of events) {
     const userId = event.source?.userId;
 
-    // ─ Follow event → welcome message ตามชื่อสาขา
     if (event.type === "follow") {
       const branchDoc = await db.collection("branches").doc(branchId).get();
       const branchName = branchDoc.exists ? branchDoc.data().name : "Cockpit";
@@ -222,7 +207,6 @@ app.post("/webhook", async (req, res) => {
       }], branchId);
     }
 
-    // ─ Message event
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
       const stripped = text.replace(/\s/g, "").toUpperCase();
@@ -231,7 +215,6 @@ app.post("/webhook", async (req, res) => {
       const isPlate = hasLetter && hasNumber && stripped.length >= 3 && stripped.length <= 10 && /^[ก-ฮA-Z0-9]+$/.test(stripped);
 
       if (isPlate) {
-        // ส่งลิงก์ลงทะเบียนพร้อม token
         const token = `${userId}_${Date.now()}`;
         await db.collection("registerTokens").doc(token).set({
           userId, branchId, createdAt: new Date().toISOString()
@@ -242,21 +225,17 @@ app.post("/webhook", async (req, res) => {
           text: `🚗 ทะเบียน "${stripped}"\n\nกรุณาลงทะเบียนเพื่อรับแจ้งเตือนสถานะรถครับ\n👇 กดลิงก์ด้านล่าง\n\n${regUrl}`
         }], branchId);
       }
-      // ข้อความอื่น → ไม่ตอบ
     }
   }
   res.json({ status: "ok" });
 });
 
 // ─── Register API ──────────────────────────────────────────
-
-// GET ตรวจสอบ token
 app.get("/api/register/:token", async (req, res) => {
   try {
     const doc = await db.collection("registerTokens").doc(req.params.token).get();
     if (!doc.exists) return res.json({ valid: false });
     const data = doc.data();
-    // token หมดอายุหลัง 24 ชั่วโมง
     const age = Date.now() - new Date(data.createdAt).getTime();
     if (age > 24 * 60 * 60 * 1000) return res.json({ valid: false });
     const branchDoc = await db.collection("branches").doc(data.branchId).get();
@@ -266,7 +245,6 @@ app.get("/api/register/:token", async (req, res) => {
   }
 });
 
-// POST submit ลงทะเบียน
 app.post("/api/register/submit", async (req, res) => {
   try {
     const { token, plate, province, phone } = req.body;
@@ -274,19 +252,15 @@ app.post("/api/register/submit", async (req, res) => {
     const tokenDoc = await db.collection("registerTokens").doc(token).get();
     if (!tokenDoc.exists) return res.status(400).json({ error: "Token ไม่ถูกต้อง" });
     const { userId, branchId } = tokenDoc.data();
-    // บันทึก lineUsers
     await db.collection("lineUsers").doc(userId).set({
       userId, plate: plate.toUpperCase().replace(/\s/g,""),
       province, phone, branchId,
       updatedAt: new Date().toISOString(),
     }, { merge: true });
-    // ลบ pendingPlate ถ้ามี
     await db.collection("lineUsers").doc(userId).update({
       pendingPlate: admin.firestore.FieldValue.delete()
     }).catch(()=>{});
-    // ลบ token
     await db.collection("registerTokens").doc(token).delete();
-    // แจ้งยืนยันใน LINE
     const branchDoc = await db.collection("branches").doc(branchId).get();
     await pushMessage(userId, [{
       type: "text",
@@ -299,38 +273,31 @@ app.post("/api/register/submit", async (req, res) => {
 });
 
 // ─── Branch API ────────────────────────────────────────────
-
-// GET ข้อมูลสาขา + ช่องซ่อมทั้งหมด
 app.get("/api/branch/:branchId", async (req, res) => {
   try {
     const { branchId } = req.params;
     const branchDoc = await db.collection("branches").doc(branchId).get();
     if (!branchDoc.exists) return res.status(404).json({ error: "Branch not found" });
-
     const branchInfo = branchDoc.data();
     const baysSnap = await db.collection("branches").doc(branchId).collection("bays").get();
     const baysData = {};
     baysSnap.forEach((doc) => { baysData[doc.id] = doc.data(); });
-
-    // ส่ง totalBays แยกจาก baysData เพื่อไม่ให้ทับกัน
     res.json({
       id: branchId,
       name: branchInfo.name,
       lineOA: branchInfo.lineOA,
-      totalBays: branchInfo.bays || 8,  // จำนวนช่องซ่อม
-      baysData,                          // ข้อมูลช่องที่มีงาน
+      totalBays: branchInfo.bays || 8,
+      baysData,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// PUT ตั้งค่าจำนวนช่อง
 app.put("/api/branch/:branchId/settings", async (req, res) => {
   try {
     const { branchId } = req.params;
     const { bays } = req.body;
-    // บันทึก bays (จำนวนช่อง) ลงใน Firestore
     await db.collection("branches").doc(branchId).set({ bays }, { merge: true });
     res.json({ success: true, branchId, totalBays: bays });
   } catch (err) {
@@ -338,14 +305,12 @@ app.put("/api/branch/:branchId/settings", async (req, res) => {
   }
 });
 
-// POST เปิดงาน
 app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const { plate, phone, province, userId: manualUserId, jobs } = req.body;
     if (!plate || !phone || !jobs?.length) return res.status(400).json({ error: "plate, phone, jobs required" });
 
-    // Auto-lookup userId โดยต้องตรงทั้ง plate และ province
     let userId = manualUserId || null;
     if (!userId) {
       const normalizedPlate = normalizePlate(plate);
@@ -355,7 +320,6 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
         const data = doc.data();
         if (normalizePlate(data.plate) !== normalizedPlate) continue;
         const userProvince = (data.province || "").trim();
-        // ถ้ามีจังหวัดทั้งสองฝั่ง ต้องตรงกัน
         if (jobProvince && userProvince && jobProvince !== userProvince) {
           console.log(`⏭️ open job: province mismatch job=${jobProvince} user=${userProvince}`);
           continue;
@@ -380,7 +344,6 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
 
     await db.collection("branches").doc(branchId).collection("bays").doc(bay).set(jobData);
 
-    // แจ้ง LINE ลูกค้า (ถ้ามี userId)
     if (userId) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
       const branchName = branchDoc.data()?.name || branchId;
@@ -393,65 +356,47 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   }
 });
 
-// POST เพิ่มงานในช่องที่มีรถอยู่แล้ว
 app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const { jobs: newJobNames } = req.body;
     if (!newJobNames?.length) return res.status(400).json({ error: "jobs required" });
-
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
-
     const job = doc.data();
     const existingNames = job.jobs.map(j => j.name);
-
-    // เพิ่มเฉพาะงานที่ยังไม่มี
     const toAdd = newJobNames
       .filter(name => !existingNames.includes(name))
       .map(name => ({ name, duration: getDuration(name), status: "waiting" }));
-
     if (!toAdd.length) return res.status(400).json({ error: "All jobs already exist" });
-
     const updatedJobs = [...job.jobs, ...toAdd];
     await ref.update({ jobs: updatedJobs });
-
-    // แจ้ง LINE ลูกค้า
     if (job.userId) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
       await pushMessage(job.userId, [buildStatusFlex({
-        plate: job.plate,
-        branchName: branchDoc.data()?.name || branchId,
-        bay,
-        bayStatus: job.bayStatus,
-        jobs: updatedJobs,
+        plate: job.plate, branchName: branchDoc.data()?.name || branchId,
+        bay, bayStatus: job.bayStatus, jobs: updatedJobs,
       })], branchId);
     }
-
-    res.json({ success: true, addedJobs: toAdd.map(j=>j.name) });
+    res.json({ success: true, addedJobs: toAdd.map(j=>j.name), totalJobs: updatedJobs.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST ลบงานย่อยออกจากช่อง
 app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const { jobIdx } = req.body;
     if (jobIdx === undefined) return res.status(400).json({ error: "jobIdx required" });
-
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
-
     const job = doc.data();
     const updatedJobs = job.jobs.filter((_, i) => i !== parseInt(jobIdx));
     if (!updatedJobs.length) return res.status(400).json({ error: "Cannot remove all jobs - must have at least 1" });
-
     await ref.update({ jobs: updatedJobs });
-
     const resolvedUserId3 = await resolveUserId({ ...job, _ref: ref });
     if (resolvedUserId3) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
@@ -465,19 +410,17 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
-
     const job = doc.data();
     const updatedJobs = [...job.jobs];
     if (updatedJobs[0]) updatedJobs[0].status = "in_progress";
-
     await ref.update({ bayStatus: "in_service", jobs: updatedJobs });
-
     if (job.userId) {
       const branchDoc = await db.collection("branches").doc(branchId).get();
       await pushMessage(job.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: "in_service", jobs: updatedJobs })], branchId);
@@ -488,7 +431,6 @@ app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
   }
 });
 
-// PATCH อัปเดตสถานะงานย่อย
 app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
   try {
     const { branchId, bay, jobIdx } = req.params;
@@ -496,16 +438,11 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job" });
-
     const job = doc.data();
     const updatedJobs = [...job.jobs];
     updatedJobs[parseInt(jobIdx)].status = status;
     await ref.update({ jobs: updatedJobs, bayStatus: "in_service" });
-
-    // ตอบ frontend ทันที ไม่รอ LINE
     res.json({ success: true });
-
-    // ส่ง LINE ใน background
     resolveUserId({ ...job, _ref: ref }).then(resolved => {
       if (!resolved) return;
       const useBranchId = resolved.branchId || branchId;
@@ -521,93 +458,38 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
   }
 });
 
-// POST ส่ง LINE อัปเดตด้วยตนเอง
 app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job" });
-
     const job = doc.data();
-    // Auto-lookup userId จาก plate ถ้า job.userId เป็น null
     const resolved = await resolveUserId({ ...job, _ref: ref });
     if (!resolved) return res.status(400).json({ error: "No LINE userId - ลูกค้ายังไม่ได้พิมพ์ทะเบียนใน LINE" });
-
     const useBranchId = resolved.branchId || branchId;
     const branchDoc = await db.collection("branches").doc(useBranchId).get();
     await pushMessage(resolved.userId, [buildStatusFlex({ plate: job.plate, branchName: branchDoc.data()?.name, bay, bayStatus: job.bayStatus, jobs: job.jobs })], useBranchId);
     await ref.update({ lineNotified: true, userId: resolved.userId });
-
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST เพิ่มงานในช่องที่มีรถอยู่แล้ว
-app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
-  try {
-    const { branchId, bay } = req.params;
-    const { jobs: newJobNames } = req.body;
-    if (!newJobNames?.length) return res.status(400).json({ error: "jobs required" });
-
-    const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
-    const doc = await ref.get();
-    if (!doc.exists) return res.status(404).json({ error: "No job in this bay" });
-
-    const job = doc.data();
-    const existingNames = job.jobs.map(j => j.name);
-
-    // เพิ่มเฉพาะงานที่ยังไม่มี
-    const toAdd = newJobNames
-      .filter(name => !existingNames.includes(name))
-      .map(name => ({ name, duration: getDuration(name), status: "waiting" }));
-
-    if (!toAdd.length) return res.status(400).json({ error: "All jobs already exist" });
-
-    const updatedJobs = [...job.jobs, ...toAdd];
-    await ref.update({ jobs: updatedJobs });
-
-    // แจ้ง LINE ลูกค้า
-    if (job.userId) {
-      const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(job.userId, [buildStatusFlex({
-        plate: job.plate,
-        branchName: branchDoc.data()?.name || branchId,
-        bay,
-        bayStatus: job.bayStatus,
-        jobs: updatedJobs,
-      })], branchId);
-    }
-
-    res.json({ success: true, addedJobs: toAdd.map(j => j.name), totalJobs: updatedJobs.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST ปิดงาน
 app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job" });
-
     const job = doc.data();
     const doneJobs = job.jobs.map((j) => ({ ...j, status: "done" }));
-
-    // ลบข้อมูลออกจาก Firestore ทันที
     await ref.delete();
     await db.collection("branches").doc(branchId).collection("history").add({
       ...job, jobs: doneJobs, closedAt: new Date().toISOString(),
     });
-
-    // ตอบ frontend ทันที ไม่รอ LINE
     res.json({ success: true, message: `Bay ${bay} cleared` });
-
-    // ส่ง LINE ใน background
     resolveUserId({ ...job }).then(resolved => {
       if (!resolved) return;
       const useBranchId = resolved.branchId || branchId;
@@ -623,19 +505,16 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
   }
 });
 
-// GET Admin – ภาพรวมทุกสาขา
 app.get("/api/admin/overview", async (req, res) => {
   try {
     const branchesSnap = await db.collection("branches").get();
     const overview = [];
-
     for (const branchDoc of branchesSnap.docs) {
       const data = branchDoc.data();
       const baysSnap = await db.collection("branches").doc(branchDoc.id).collection("bays").get();
       const activeBays = baysSnap.size;
       const allJobs = [];
       baysSnap.forEach((b) => allJobs.push(...(b.data().jobs || [])));
-
       overview.push({
         branchId: branchDoc.id,
         name: data.name,
@@ -649,14 +528,12 @@ app.get("/api/admin/overview", async (req, res) => {
         waitingJobs: allJobs.filter((j) => j.status === "waiting").length,
       });
     }
-
     res.json({ overview, updatedAt: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET Health check
 app.get("/", (req, res) => res.json({ status: "Cockpit Pro Backend OK 🚗", time: new Date().toISOString() }));
 
 const PORT = process.env.PORT || 3000;
