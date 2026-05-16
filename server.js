@@ -159,7 +159,14 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
 
 // ─── Helpers ───────────────────────────────────────────────
 function getDuration(name) {
-  const map = { ยาง: 45, ตั้งศูนย์: 60, ถ่วงล้อ: 30, แบตเตอรี่: 20, เบรค: 50, โช้คอัพ: 90, น้ำมันเครื่อง: 25, "Cockpit Sure": 35, อื่นๆ: 40 };
+  const map = {
+    "เปลี่ยนยาง 4 เส้น": 52, "ถ่วงล้อ": 35, "ตั้งศูนย์ล้อ": 52,
+    "เปลี่ยนถ่ายน้ำมันเครื่อง": 35, "เปลี่ยนแบตเตอรี่": 25, "เปลี่ยนเบรก": 52,
+    "CockpitSure": 17, "เปลี่ยนโช้คอัพ": 52, "งานซ่อมช่วงล่าง": 135,
+    "เบิกอะไหล่": 85, "งานซ่อมอื่น": 75,
+    "ยาง": 52, "ตั้งศูนย์": 52, "แบตเตอรี่": 25, "เบรค": 52,
+    "โช้คอัพ": 52, "น้ำมันเครื่อง": 35, "Cockpit Sure": 17, "อื่นๆ": 75,
+  };
   return map[name] || 30;
 }
 
@@ -413,7 +420,7 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
 app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
-    const { jobIdx } = req.body;
+    const { jobIdx, nonotify } = req.body;
     if (jobIdx === undefined) return res.status(400).json({ error: "jobIdx required" });
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
@@ -422,13 +429,16 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
     const updatedJobs = job.jobs.filter((_, i) => i !== parseInt(jobIdx));
     if (!updatedJobs.length) return res.status(400).json({ error: "Cannot remove all jobs - must have at least 1" });
     await ref.update({ jobs: updatedJobs });
-    const resolvedUserId3 = await resolveUserId({ ...job, _ref: ref });
-    if (resolvedUserId3) {
-      const branchDoc = await db.collection("branches").doc(branchId).get();
-      await pushMessage(resolvedUserId3, [buildStatusFlex({
-        plate: job.plate, branchName: branchDoc.data()?.name || branchId,
-        bay, bayStatus: job.bayStatus, jobs: updatedJobs,
-      })], branchId);
+    // Only notify LINE if nonotify flag is NOT set
+    if (!nonotify) {
+      const resolvedUserId3 = await resolveUserId({ ...job, _ref: ref });
+      if (resolvedUserId3) {
+        const branchDoc = await db.collection("branches").doc(branchId).get();
+        await pushMessage(resolvedUserId3, [buildStatusFlex({
+          plate: job.plate, branchName: branchDoc.data()?.name || branchId,
+          bay, bayStatus: job.bayStatus, jobs: updatedJobs,
+        })], branchId);
+      }
     }
     res.json({ success: true, remainingJobs: updatedJobs.length });
   } catch (err) {
@@ -557,6 +567,19 @@ app.get("/api/admin/overview", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET History by branch
+app.get("/api/branch/:branchId/history", async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const limit = parseInt(req.query.limit) || 100;
+    const snap = await db.collection("branches").doc(branchId)
+      .collection("history").orderBy("closedAt", "desc").limit(limit).get();
+    const history = [];
+    snap.forEach(doc => history.push({ id: doc.id, ...doc.data() }));
+    res.json({ history, branchId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/", (req, res) => res.json({ status: "Cockpit Pro Backend OK 🚗", time: new Date().toISOString() }));
