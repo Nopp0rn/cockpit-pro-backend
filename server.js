@@ -515,6 +515,7 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
 app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
+    const { nonotify } = req.body;
     const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
     const doc = await ref.get();
     if (!doc.exists) return res.status(404).json({ error: "No job" });
@@ -523,18 +524,22 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     await ref.delete();
     await db.collection("branches").doc(branchId).collection("history").add({
       ...job, jobs: doneJobs, closedAt: new Date().toISOString(),
+      cancelled: !!nonotify,
     });
     res.json({ success: true, message: `Bay ${bay} cleared` });
-    resolveUserId({ ...job }).then(resolved => {
-      if (!resolved) return;
-      const useBranchId = resolved.branchId || branchId;
-      db.collection("branches").doc(useBranchId).get().then(branchDoc => {
-        pushMessage(resolved.userId, [buildStatusFlex({
-          plate: job.plate, branchName: branchDoc.data()?.name,
-          bay, bayStatus: "done", jobs: doneJobs
-        })], useBranchId);
+    // ส่ง LINE เฉพาะกรณีที่ไม่ได้ยกเลิก
+    if (!nonotify) {
+      resolveUserId({ ...job }).then(resolved => {
+        if (!resolved) return;
+        const useBranchId = resolved.branchId || branchId;
+        db.collection("branches").doc(useBranchId).get().then(branchDoc => {
+          pushMessage(resolved.userId, [buildStatusFlex({
+            plate: job.plate, branchName: branchDoc.data()?.name,
+            bay, bayStatus: "done", jobs: doneJobs
+          })], useBranchId);
+        });
       });
-    });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
