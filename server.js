@@ -574,6 +574,29 @@ app.get("/api/admin/overview", async (req, res) => {
   }
 });
 
+// POST ส่งวีดีโอ CockpitSure ทาง LINE
+app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { videoUrl, plate } = req.body;
+    if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
+    const ref = db.collection("branches").doc(branchId).collection("bays").doc(bay);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: "No job" });
+    const job = doc.data();
+    const resolved = await resolveUserId({ ...job, _ref: ref });
+    if (!resolved) return res.status(400).json({ error: "No LINE userId — ลูกค้ายังไม่ได้ลงทะเบียน LINE" });
+    const useBranchId = resolved.branchId || branchId;
+    const branchDoc = await db.collection("branches").doc(useBranchId).get();
+    const branchName = branchDoc.data()?.name || branchId;
+    await pushMessage(resolved.userId, [{
+      type: "text",
+      text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate || job.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`
+    }], useBranchId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // GET History by branch
 app.get("/api/branch/:branchId/history", async (req, res) => {
   try {
