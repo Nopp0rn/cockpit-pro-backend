@@ -593,8 +593,32 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
       type: "text",
       text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate || job.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`
     }], useBranchId);
+
+    // บันทึก video URL ลง Firebase
+    await db.collection("branches").doc(useBranchId).collection("videos").add({
+      plate: plate || job.plate,
+      province: job.province || "",
+      videoUrl,
+      uploadedAt: new Date().toISOString(),
+      branchId: useBranchId,
+      branchName,
+    });
+
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET Videos by branch
+app.get("/api/branch/:branchId/videos", async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const limit = parseInt(req.query.limit) || 60;
+    const snap = await db.collection("branches").doc(branchId)
+      .collection("videos").orderBy("uploadedAt", "desc").limit(limit).get();
+    const videos = [];
+    snap.forEach(doc => videos.push({ id: doc.id, ...doc.data() }));
+    res.json({ videos, branchId });
+  } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 // GET History by branch
