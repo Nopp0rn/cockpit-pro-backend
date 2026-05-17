@@ -160,7 +160,7 @@ function buildStatusFlex({ plate, province, branchName, bay, bayStatus, jobs }) 
 // ─── Helpers ───────────────────────────────────────────────
 function getDuration(name) {
   const map = {
-    "เปลี่ยนยาง 4 เส้น": 52, "ถ่วงล้อ": 35, "ตั้งศูนย์ล้อ": 52,
+    "เปลี่ยนยาง 4 เส้น": 52, "สลับยาง": 12, "ยาง 1,2,3 เส้น": 20, "ถ่วงล้อ": 35, "ตั้งศูนย์ล้อ": 52,
     "เปลี่ยนถ่ายน้ำมันเครื่อง": 35, "เปลี่ยนแบตเตอรี่": 25, "เปลี่ยนเบรก": 52,
     "CockpitSure": 17, "เปลี่ยนโช้คอัพ": 52, "งานซ่อมช่วงล่าง": 135,
     "เบิกอะไหล่": 85, "งานซ่อมอื่น": 75,
@@ -524,7 +524,7 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     await ref.delete();
     await db.collection("branches").doc(branchId).collection("history").add({
       ...job, jobs: doneJobs, closedAt: new Date().toISOString(),
-      cancelled: !!nonotify,
+      cancelled: !!nonotify, bay,
     });
     res.json({ success: true, message: `Bay ${bay} cleared` });
     // ส่ง LINE เฉพาะกรณีที่ไม่ได้ยกเลิก
@@ -632,6 +632,57 @@ app.get("/api/branch/:branchId/history", async (req, res) => {
     snap.forEach(doc => history.push({ id: doc.id, ...doc.data() }));
     res.json({ history, branchId });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST คืนสถานะรถจาก history กลับสู่คิว (ภายในวันเดียวกัน)
+app.post("/api/branch/:branchId/history/:historyId/reopen", async (req, res) => {
+  try {
+    const { branchId, historyId } = req.params;
+    const histRef = db.collection("branches").doc(branchId)
+      .collection("history").doc(historyId);
+    const doc = await histRef.get();
+    if (!doc.exists) return res.status(404).json({ error: "ไม่พบข้อมูล" });
+    const data = doc.data();
+
+    // ตรวจสอบว่าปิดวันนี้
+    const closedAt = new Date(data.closedAt);
+    const now = new Date();
+    const isSameDay = closedAt.toDateString() === now.toDateString();
+    if (!isSameDay) return res.status(400).json({ error: "คืนสถานะได้เฉพาะวันเดียวกันเท่านั้น" });
+
+    // หาช่องว่าง (ใช้ bay เดิมก่อน ถ้าเต็มหาช่องใหม่)
+    const originalBay = data.bay || "1";
+    let targetBay = originalBay;
+    const bayRef = db.collection("branches").doc(branchId).collection("bays").doc(targetBay);
+    const bayDoc = await bayRef.get();
+    if (bayDoc.exists) {
+      // หาช่องว่าง 1-20
+      let found = false;
+      for (let i = 1; i <= 20; i++) {
+        const r = db.collection("branches").doc(branchId).collection("bays").doc(String(i));
+        const d = await r.get();
+        if (!d.exists) { targetBay = String(i); found = true; break; }
+      }
+      if (!found) return res.status(400).json({ error: "ไม่มีช่องว่าง" });
+    }
+
+    // Reset job statuses → waiting (ยกเว้น รับรถเข้า)
+    const restoredJobs = (data.jobs||[]).map(j =>
+      j.name === "รับรถเข้า" ? j : {...j, status:"waiting"}
+    );
+
+    // คืนกลับสู่ bays
+    await db.collection("branches").doc(branchId).collection("bays").doc(targetBay).set({
+      plate: data.plate, province: data.province || "",
+      phone: data.phone || "", userId: data.userId || null,
+      bayStatus: "waiting_entry", jobs: restoredJobs,
+      reopenedAt: new Date().toISOString(),
+    });
+
+    // ลบออกจาก history
+    await histRef.delete();
+    res.json({ success: true, bay: targetBay });
+  } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get("/", (req, res) => res.json({ status: "Cockpit Pro Backend OK 🚗", time: new Date().toISOString() }));
