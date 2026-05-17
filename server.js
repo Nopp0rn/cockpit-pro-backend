@@ -621,13 +621,23 @@ app.get("/api/branch/:branchId/videos", async (req, res) => {
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET History by branch
+// GET History by branch (supports date range: from, to)
 app.get("/api/branch/:branchId/history", async (req, res) => {
   try {
     const { branchId } = req.params;
-    const limit = parseInt(req.query.limit) || 100;
-    const snap = await db.collection("branches").doc(branchId)
-      .collection("history").orderBy("closedAt", "desc").limit(limit).get();
+    const limit = parseInt(req.query.limit) || 500;
+    const { from, to } = req.query; // YYYY-MM-DD format
+    let query = db.collection("branches").doc(branchId)
+      .collection("history").orderBy("closedAt", "desc");
+    if (from) {
+      const fromDt = new Date(from); fromDt.setHours(0,0,0,0);
+      query = query.where("closedAt", ">=", fromDt.toISOString());
+    }
+    if (to) {
+      const toDt = new Date(to); toDt.setHours(23,59,59,999);
+      query = query.where("closedAt", "<=", toDt.toISOString());
+    }
+    const snap = await query.limit(limit).get();
     const history = [];
     snap.forEach(doc => history.push({ id: doc.id, ...doc.data() }));
     res.json({ history, branchId });
