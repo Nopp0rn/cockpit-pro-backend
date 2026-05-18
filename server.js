@@ -189,6 +189,7 @@ app.get("/api/register/check", async (req, res) => {
 
 // ─── Register submit ──────────────────────────────────────────
 app.post("/api/register/submit", async (req, res) => {
+  try {
     const { token, plate, province, phone } = req.body;
     if (!token || !plate) return res.status(400).json({ error: "token+plate required" });
 
