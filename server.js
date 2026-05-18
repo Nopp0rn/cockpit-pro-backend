@@ -114,7 +114,7 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
           { type: "text", text: "ขอบคุณที่ใช้บริการ Cockpit 🙏", size: "xs", color: "#9ca3af", align: "center" },
           ...(bayStatus === "done" ? [{
             type: "text",
-            text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
+            text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระค่าสินค้าและบริการ",
             size: "sm", color: "#1A1A1A", weight: "bold",
             align: "center", wrap: true, margin: "sm",
           }] : []),
