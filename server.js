@@ -163,10 +163,31 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// REGISTER
-// ═══════════════════════════════════════════════════════════════
-app.post("/api/register/submit", async (req, res) => {
+// ─── Validate register token (called by register.html on load) ───
+app.get("/api/register/check", async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ valid: false, error: "No token" });
+
+    const { data: tk } = await supabase.from("register_tokens")
+      .select("*").eq("token", token).single();
+
+    if (!tk) return res.status(404).json({ valid: false, error: "Token not found" });
+    if (new Date(tk.expires_at) < new Date())
+      return res.status(400).json({ valid: false, error: "Token expired" });
+
+    const { data: br } = await supabase.from("branches")
+      .select("name").eq("id", tk.branch_id).single();
+
+    res.json({
+      valid: true,
+      branchId: tk.branch_id,
+      branchName: br?.name || tk.branch_id,
+    });
+  } catch (e) { res.status(500).json({ valid: false, error: e.message }); }
+});
+
+// ─── Register submit ──────────────────────────────────────────
   try {
     const { token, plate, province, phone } = req.body;
     if (!token || !plate) return res.status(400).json({ error: "token+plate required" });
