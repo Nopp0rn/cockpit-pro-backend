@@ -390,9 +390,15 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     res.json({ success:true });
 
     if (!nonotify && row.line_user_id) {
+      // ส่ง Flex Card สรุปงานก่อน
+      await push(row.line_user_id, [statusFlex({
+        plate: row.plate, branchName, bay,
+        bayStatus: "done", jobs: doneJobs,
+      })], branchId);
+      // แล้วตามด้วยข้อความแจ้งชำระเงิน
       await push(row.line_user_id, [{
-        type:"text",
-        text:"งานเสร็จเรียบร้อย ✅\nหากท่านอยู่ในสาขากรุณารอสักครู่ พนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
+        type: "text",
+        text: "งานเสร็จเรียบร้อย ✅\nหากท่านอยู่ในสาขากรุณารอสักครู่ พนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
       }], branchId);
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
