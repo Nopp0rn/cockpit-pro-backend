@@ -499,6 +499,17 @@ app.get("/api/branch/:branchId/videos", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// DELETE video by id
+app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
+  try {
+    const { branchId, videoId } = req.params;
+    const { error } = await supabase.from("videos")
+      .delete().eq("id", +videoId).eq("branch_id", branchId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // HEALTH
 // ═══════════════════════════════════════════════════════════════
