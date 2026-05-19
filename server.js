@@ -4,15 +4,72 @@ const cors     = require("cors");
 const crypto   = require("crypto");
 const line     = require("@line/bot-sdk");
 const { createClient } = require("@supabase/supabase-js");
+const { v2: cloudinary } = require("cloudinary");
+const cron     = require("node-cron");
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
 // ── Supabase ───────────────────────────────────────────────────
 const supabase = createClient(
-  process.env.SUPABASE_URL,          // https://yigveyqcfzkxjzsrlger.supabase.co
-  process.env.SUPABASE_SERVICE_KEY   // service_role key (ใส่ใน Render env)
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
 );
+
+// ── Cloudinary ────────────────────────────────────────────────
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD || "dnmzyoobh",
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// ── Monthly video cleanup ─────────────────────────────────────
+async function cleanupOldVideos() {
+  try {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 1);
+    console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
+
+    const { data: oldVideos, error } = await supabase.from("videos")
+      .select("id, video_url, plate, branch_id")
+      .lt("uploaded_at", cutoff.toISOString());
+
+    if (error) { console.error("Cleanup fetch error:", error.message); return; }
+    if (!oldVideos?.length) { console.log("✅ ไม่มีวีดีโอเก่า"); return; }
+
+    console.log(`🗑 พบ ${oldVideos.length} วีดีโอที่จะลบ`);
+    let deleted = 0, failed = 0;
+
+    for (const v of oldVideos) {
+      try {
+        // Extract Cloudinary public_id from URL
+        const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+        if (match?.[1]) {
+          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
+        }
+        await supabase.from("videos").delete().eq("id", v.id);
+        console.log(`  ✅ ลบแล้ว: ${v.plate} (${v.id})`);
+        deleted++;
+      } catch (e) {
+        console.error(`  ❌ ลบไม่ได้: ${v.plate} — ${e.message}`);
+        failed++;
+      }
+    }
+    console.log(`🧹 Cleanup เสร็จ: ลบ ${deleted} คลิป, ล้มเหลว ${failed} คลิป`);
+  } catch (e) {
+    console.error("Cleanup error:", e.message);
+  }
+}
+
+// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7)
+// cron: '0 19 1 * *' = 02:00 Thailand (UTC 19:00 วันก่อน)
+cron.schedule("0 19 1 * *", () => {
+  console.log("⏰ Monthly cleanup triggered");
+  cleanupOldVideos();
+}, { timezone: "UTC" });
+
+console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น.)");
+
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
@@ -114,7 +171,7 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
           { type: "text", text: "ขอบคุณที่ใช้บริการ Cockpit 🙏", size: "xs", color: "#9ca3af", align: "center" },
           ...(bayStatus === "done" ? [{
             type: "text",
-            text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระค่าสินค้าและบริการ",
+            text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
             size: "sm", color: "#1A1A1A", weight: "bold",
             align: "center", wrap: true, margin: "sm",
           }] : []),
@@ -505,10 +562,23 @@ app.get("/api/branch/:branchId/videos", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE video by id
+// DELETE video by id (ลบจาก Supabase + Cloudinary)
 app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
   try {
     const { branchId, videoId } = req.params;
+    const { data: v } = await supabase.from("videos")
+      .select("video_url").eq("id", +videoId).eq("branch_id", branchId).single();
+
+    // ลบจาก Cloudinary
+    if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
+      const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+      if (match?.[1]) {
+        await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
+          .catch(e => console.error("Cloudinary delete:", e.message));
+      }
+    }
+
+    // ลบจาก Supabase
     const { error } = await supabase.from("videos")
       .delete().eq("id", +videoId).eq("branch_id", branchId);
     if (error) throw error;
