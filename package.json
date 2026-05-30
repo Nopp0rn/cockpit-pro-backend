@@ -1,15 +1,15 @@
 {
   "name": "cockpit-pro-backend",
   "version": "2.0.0",
-  "description": "Cockpit Pro Queue Backend — Supabase",
+  "description": "Cockpit Pro Queue Backend — Multi-LINE OA / Supabase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "@line/bot-sdk": "^9.3.0",
     "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.0",
     "cloudinary": "^2.5.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
