@@ -2,13 +2,13 @@ require("dotenv").config();
 const express  = require("express");
 const cors     = require("cors");
 const crypto   = require("crypto");
-const line     = require("@line/bot-sdk");
+const axios    = require("axios");
 const { createClient } = require("@supabase/supabase-js");
 const { v2: cloudinary } = require("cloudinary");
 const cron     = require("node-cron");
 
 const app  = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 
 // ── Supabase ───────────────────────────────────────────────────
 const supabase = createClient(
@@ -16,91 +16,95 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── Cloudinary ────────────────────────────────────────────────
+// ── Cloudinary ─────────────────────────────────────────────────
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || process.env.CLOUDINARY_CLOUD || "dnmzyoobh",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dnmzyoobh",
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ── Monthly video cleanup ─────────────────────────────────────
-async function cleanupOldVideos() {
+const WEBAPP_URL = process.env.WEBAPP_URL || "https://cockpit-pro-webapp-staging.vercel.app";
+
+// ── Middleware ─────────────────────────────────────────────────
+app.use(cors({ origin: "*" }));
+app.use((req, res, next) => {
+  if (req.path === "/webhook") {
+    express.raw({ type: "application/json" })(req, res, next);
+  } else {
+    express.json({ limit: "10mb" })(req, res, next);
+  }
+});
+
+// ── Multi-LINE OA Credential Cache (10 min) ────────────────────
+const credCache = {};
+
+async function getBranchCreds(branchId) {
+  if (credCache[branchId]) return credCache[branchId];
+  const { data } = await supabase
+    .from("branches")
+    .select("id, name, line_channel_id, line_secret, line_token")
+    .eq("id", branchId)
+    .single();
+  if (!data) return null;
+  credCache[branchId] = data;
+  setTimeout(() => { delete credCache[branchId]; }, 10 * 60 * 1000);
+  return data;
+}
+
+async function getBranchByChannelId(channelId) {
+  const { data } = await supabase
+    .from("branches")
+    .select("id, name, line_channel_id, line_secret, line_token")
+    .eq("line_channel_id", channelId)
+    .single();
+  return data || null;
+}
+
+// ── LINE Push / Reply ──────────────────────────────────────────
+async function linePush(branchId, userId, messages) {
+  if (!userId || !branchId) return;
+  const creds = await getBranchCreds(branchId);
+  if (!creds?.line_token) {
+    console.error(`[LINE] No token for branch: ${branchId}`);
+    return;
+  }
   try {
-    const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - 1);
-    console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
-
-    const { data: oldVideos, error } = await supabase.from("videos")
-      .select("id, video_url, plate, branch_id")
-      .lt("uploaded_at", cutoff.toISOString());
-
-    if (error) { console.error("Cleanup fetch error:", error.message); return; }
-    if (!oldVideos?.length) { console.log("✅ ไม่มีวีดีโอเก่า"); return; }
-
-    console.log(`🗑 พบ ${oldVideos.length} วีดีโอที่จะลบ`);
-    let deleted = 0, failed = 0;
-
-    for (const v of oldVideos) {
-      try {
-        // Extract Cloudinary public_id from URL
-        const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-        if (match?.[1]) {
-          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
-        }
-        await supabase.from("videos").delete().eq("id", v.id);
-        console.log(`  ✅ ลบแล้ว: ${v.plate} (${v.id})`);
-        deleted++;
-      } catch (e) {
-        console.error(`  ❌ ลบไม่ได้: ${v.plate} — ${e.message}`);
-        failed++;
-      }
-    }
-    console.log(`🧹 Cleanup เสร็จ: ลบ ${deleted} คลิป, ล้มเหลว ${failed} คลิป`);
+    await axios.post(
+      "https://api.line.me/v2/bot/message/push",
+      { to: userId, messages },
+      { headers: { Authorization: `Bearer ${creds.line_token}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[LINE] ✅ Push → ${userId} via ${branchId}`);
   } catch (e) {
-    console.error("Cleanup error:", e.message);
+    console.error(`[LINE] ❌ Push error [${branchId}]:`, e.response?.data || e.message);
   }
 }
 
-// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7)
-// cron: '0 19 1 * *' = 02:00 Thailand (UTC 19:00 วันก่อน)
-cron.schedule("0 19 1 * *", () => {
-  console.log("⏰ Monthly cleanup triggered");
-  cleanupOldVideos();
-}, { timezone: "UTC" });
+async function lineReply(branchId, replyToken, messages) {
+  if (!replyToken || !branchId) return;
+  const creds = await getBranchCreds(branchId);
+  if (!creds?.line_token) return;
+  try {
+    await axios.post(
+      "https://api.line.me/v2/bot/message/reply",
+      { replyToken, messages },
+      { headers: { Authorization: `Bearer ${creds.line_token}`, "Content-Type": "application/json" } }
+    );
+    console.log(`[LINE] ✅ Reply sent via ${branchId}`);
+  } catch (e) {
+    console.error(`[LINE] ❌ Reply error [${branchId}]:`, e.response?.data || e.message);
+  }
+}
 
-console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น.)");
-
-
-// ── Middleware ────────────────────────────────────────────────
-app.use(cors({ origin: "*" }));
-app.use((req, res, next) => {
-  req.path === "/webhook"
-    ? express.raw({ type: "application/json" })(req, res, next)
-    : express.json()(req, res, next);
-});
-
-// ── Helpers ───────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────
 function getDuration(name) {
   const map = {
-    "เปลี่ยนยาง 4 เส้น":52, "สลับยาง":12, "ยาง 1,2,3 เส้น":20,
-    "ถ่วงล้อ":35, "ตั้งศูนย์ล้อ":52, "เปลี่ยนถ่ายน้ำมันเครื่อง":35,
-    "เปลี่ยนแบตเตอรี่":25, "เปลี่ยนเบรก":52, "CockpitSure":17,
-    "เปลี่ยนโช้คอัพ":52, "งานซ่อมช่วงล่าง":135,
-    "เบิกอะไหล่":85, "งานซ่อมอื่น":75,
+    "เปลี่ยนยาง 4 เส้น":52,"สลับยาง":12,"ยาง 1,2,3 เส้น":20,
+    "ถ่วงล้อ":35,"ตั้งศูนย์ล้อ":52,"เปลี่ยนถ่ายน้ำมันเครื่อง":35,
+    "เปลี่ยนแบตเตอรี่":25,"เปลี่ยนเบรก":52,"CockpitSure":17,
+    "เปลี่ยนโช้คอัพ":52,"งานซ่อมช่วงล่าง":135,"เบิกอะไหล่":85,"งานซ่อมอื่น":75,
   };
   return map[name] || 30;
-}
-
-async function getFreeBay(branchId) {
-  const { data } = await supabase.from("queue").select("bay").eq("branch_id", branchId);
-  const used = (data || []).map(r => r.bay);
-  for (let i = 1; i <= 20; i++) if (!used.includes(String(i))) return String(i);
-  return null;
-}
-
-async function getBranchName(branchId) {
-  const { data } = await supabase.from("branches").select("name").eq("id", branchId).single();
-  return data?.name || branchId;
 }
 
 async function getQueueRow(branchId, bay) {
@@ -109,27 +113,30 @@ async function getQueueRow(branchId, bay) {
   return data;
 }
 
-// ── LINE (Single shared bot) ──────────────────────────────────
-const LINE_SECRET = process.env.LINE_SECRET;
-const LINE_TOKEN  = process.env.LINE_TOKEN;
-const lineClient  = LINE_TOKEN
-  ? new line.messagingApi.MessagingApiClient({ channelAccessToken: LINE_TOKEN })
-  : null;
-
-async function push(userId, messages) {
-  if (!lineClient || !userId) return;
-  try { await lineClient.pushMessage({ to: userId, messages }); }
-  catch (e) { console.error("LINE push:", e.message); }
+async function getBranchName(branchId) {
+  const { data } = await supabase.from("branches").select("name").eq("id", branchId).single();
+  return data?.name || branchId;
 }
 
+// FIX: lookup line_user_id by plate+province from line_users table
+async function lookupLineUser(plate, province) {
+  const { data } = await supabase.from("line_users")
+    .select("user_id")
+    .eq("plate", plate.toUpperCase())
+    .eq("province", province || "")
+    .single();
+  return data?.user_id || null;
+}
+
+// ── Flex Message: Status ───────────────────────────────────────
 function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
-  const real = jobs.filter(j => j.name !== "รับรถเข้า");
+  const real = (jobs || []).filter(j => j.name !== "รับรถเข้า");
   const done = real.filter(j => j.status === "done").length;
   const pct  = real.length ? Math.round(done / real.length * 100) : 0;
-  const st   = bayStatus === "done" ? "✅ เสร็จเรียบร้อย"
+  const st   = bayStatus === "done"       ? "✅ เสร็จเรียบร้อย"
              : bayStatus === "in_service" ? "🔧 กำลังดำเนินการ"
              : "⏳ รอเข้าช่องซ่อม";
-  const col  = bayStatus === "done" ? "#059669"
+  const col  = bayStatus === "done"       ? "#059669"
              : bayStatus === "in_service" ? "#d97706" : "#374151";
   return {
     type: "flex", altText: `สถานะ ${plate} — ${st}`,
@@ -158,12 +165,11 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
               ...real.map(j => ({
                 type: "box", layout: "horizontal", margin: "sm",
                 contents: [
-                  { type: "text", size: "sm", flex: 0,
-                    text: j.status==="done"?"✅":j.status==="in_progress"?"🔧":"⏳" },
+                  { type: "text", size: "sm", flex: 0, text: j.status==="done"?"✅":j.status==="in_progress"?"🔧":"⏳" },
                   { type: "text", text: j.name, size: "sm", flex: 1, margin: "sm",
                     decoration: j.status==="done"?"line-through":"none",
                     color: j.status==="done"?"#9ca3af":"#1A1A1A" },
-                  { type: "text", text: `${j.duration} นาที`, size: "xs", color: "#9ca3af", align: "end" },
+                  { type: "text", text: `${j.duration||30} นาที`, size: "xs", color: "#9ca3af", align: "end" },
                 ],
               })),
             ],
@@ -172,8 +178,7 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
           ...(bayStatus === "done" ? [{
             type: "text",
             text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
-            size: "sm", color: "#1A1A1A", weight: "bold",
-            align: "center", wrap: true, margin: "sm",
+            size: "sm", color: "#1A1A1A", weight: "bold", align: "center", wrap: true, margin: "sm",
           }] : []),
         ],
       },
@@ -181,292 +186,255 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ── Monthly Video Cleanup ──────────────────────────────────────
+async function cleanupOldVideos() {
+  try {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 1);
+    console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
+    const { data: oldVideos, error } = await supabase.from("videos")
+      .select("id, video_url, plate").lt("uploaded_at", cutoff.toISOString());
+    if (error || !oldVideos?.length) { console.log("✅ ไม่มีวีดีโอเก่า"); return; }
+    console.log(`🗑 พบ ${oldVideos.length} วีดีโอที่จะลบ`);
+    let deleted = 0;
+    for (const v of oldVideos) {
+      try {
+        const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+        if (match?.[1]) await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
+        await supabase.from("videos").delete().eq("id", v.id);
+        deleted++;
+      } catch (e) { console.error(`  ❌ ${v.plate}: ${e.message}`); }
+    }
+    console.log(`🧹 Cleanup เสร็จ: ลบ ${deleted} คลิป`);
+  } catch (e) { console.error("Cleanup error:", e.message); }
+}
+
+cron.schedule("0 19 1 * *", () => { console.log("⏰ Monthly cleanup"); cleanupOldVideos(); }, { timezone: "UTC" });
+console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น.)");
+
+// ══════════════════════════════════════════════════════════════
 // WEBHOOK
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 app.post("/webhook", async (req, res) => {
-  const sig = req.headers["x-line-signature"];
-  const buf = req.body;
+  res.sendStatus(200); // ต้อง return 200 ก่อนเสมอ
 
-  // Verify signature with single shared secret
-  if (LINE_SECRET) {
-    const hash = crypto.createHmac("sha256", LINE_SECRET).update(buf).digest("base64");
-    if (hash !== sig) return res.sendStatus(401);
+  let body;
+  try { body = JSON.parse(req.body.toString()); } catch { return; }
+
+  const channelId = body.destination;
+  if (!channelId) return;
+
+  const branch = await getBranchByChannelId(channelId);
+  if (!branch) {
+    console.error(`[Webhook] Unknown channel ID: ${channelId}`);
+    return;
   }
-  res.sendStatus(200);
 
-  let body; try { body = JSON.parse(buf.toString()); } catch { return; }
+  // Verify signature
+  const sig = req.headers["x-line-signature"];
+  if (sig && branch.line_secret) {
+    const hash = crypto.createHmac("sha256", branch.line_secret).update(req.body).digest("base64");
+    if (hash !== sig) {
+      console.error(`[Webhook] Invalid signature for branch: ${branch.id}`);
+      return;
+    }
+  }
 
   for (const ev of body.events || []) {
-    if (ev.type !== "message" || ev.message.type !== "text") continue;
-    const userId = ev.source.userId;
-    const text   = ev.message.text.trim().toUpperCase().replace(/\s+/g, "");
-    if (!/^[ก-ฮ0-9A-Z]{2,10}$/.test(text)) continue;
-
-    // Look up which branch this user belongs to from their previous registration
-    const { data: existing } = await supabase.from("line_users")
-      .select("branch_id").eq("user_id", userId).single();
-
-    // Fallback: use first available branch
-    let branchId = existing?.branch_id;
-    if (!branchId) {
-      const { data: branches } = await supabase.from("branches").select("id").limit(1);
-      branchId = branches?.[0]?.id;
-    }
-    if (!branchId) continue;
-
-    await supabase.from("line_users").upsert(
-      { user_id: userId, plate: text, branch_id: branchId },
-      { onConflict: "user_id" }
-    );
-
-    const token   = crypto.randomBytes(16).toString("hex");
-    const expires = new Date(Date.now() + 86400000).toISOString();
-    await supabase.from("register_tokens")
-      .insert({ token, branch_id: branchId, line_user_id: userId, expires_at: expires });
-
-    const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
-    if (lineClient) {
-      await lineClient.replyMessage({
-        replyToken: ev.replyToken,
-        messages: [{ type: "text",
-          text: `🚗 ทะเบียน "${text}"\nกรุณาลงทะเบียนเพื่อเข้าคิว 👇\n${base}/register.html?token=${token}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` }],
-      });
-    }
+    try { await handleLineEvent(ev, branch); }
+    catch (e) { console.error(`[Webhook] Event error [${branch.id}]:`, e.message); }
   }
 });
 
-// ─── Validate register token (called by register.html on load) ───
-app.get("/api/register/check", async (req, res) => {
-  try {
-    const { token } = req.query;
-    if (!token) return res.status(400).json({ valid: false, error: "No token" });
+async function handleLineEvent(ev, branch) {
+  const userId   = ev.source?.userId;
+  const branchId = branch.id;
+  const branchName = branch.name;
 
-    const { data: tk } = await supabase.from("register_tokens")
-      .select("*").eq("token", token).single();
-
-    if (!tk) return res.status(404).json({ valid: false, error: "Token not found" });
-    if (new Date(tk.expires_at) < new Date())
-      return res.status(400).json({ valid: false, error: "Token expired" });
-
-    const { data: br } = await supabase.from("branches")
-      .select("name").eq("id", tk.branch_id).single();
-
-    res.json({
-      valid: true,
-      branchId: tk.branch_id,
-      branchName: br?.name || tk.branch_id,
+  if (ev.type === "follow") {
+    const token    = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 86400000).toISOString();
+    await supabase.from("register_tokens").insert({
+      token, branch_id: branchId, line_user_id: userId, expires_at: expiresAt,
     });
-  } catch (e) { res.status(500).json({ valid: false, error: e.message }); }
-});
+    const regUrl = `${WEBAPP_URL}/register.html?token=${token}`;
+    await lineReply(branchId, ev.replyToken, [
+      { type: "text", text: `ยินดีต้อนรับสู่ ${branchName} 🚗\nกรุณาลงทะเบียนทะเบียนรถเพื่อรับแจ้งเตือน` },
+      { type: "template", altText: "ลงทะเบียน Cockpit Pro",
+        template: { type: "buttons", text: "ลงทะเบียนทะเบียนรถ",
+          actions: [{ type: "uri", label: "📝 ลงทะเบียน", uri: regUrl }] } },
+    ]);
+    return;
+  }
 
-// ─── Validate token via path param: /api/register/:token (register.html format) ───
+  if (ev.type === "message" && ev.message?.type === "text") {
+    const text = ev.message.text.trim().toLowerCase();
+    if (text === "ลงทะเบียน" || text === "register") {
+      const token = crypto.randomUUID();
+      const expiresAt = new Date(Date.now() + 86400000).toISOString();
+      await supabase.from("register_tokens").insert({
+        token, branch_id: branchId, line_user_id: userId, expires_at: expiresAt,
+      });
+      const regUrl = `${WEBAPP_URL}/register.html?token=${token}`;
+      await lineReply(branchId, ev.replyToken, [
+        { type: "text", text: `คลิกลิงก์ด้านล่างเพื่อลงทะเบียน:\n${regUrl}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` },
+      ]);
+      return;
+    }
+    if (text === "สถานะ" || text === "status") {
+      const { data: queue } = await supabase.from("queue")
+        .select("*").eq("line_user_id", userId)
+        .order("created_at", { ascending: false }).limit(1);
+      if (queue?.length) {
+        const q = queue[0];
+        await lineReply(branchId, ev.replyToken, [
+          statusFlex({ plate: q.plate, branchName, bay: q.bay, bayStatus: q.bay_status, jobs: q.jobs }),
+        ]);
+      } else {
+        await lineReply(branchId, ev.replyToken, [{ type: "text", text: "ไม่มีรถในคิวขณะนี้" }]);
+      }
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// REGISTER
+// ══════════════════════════════════════════════════════════════
 app.get("/api/register/:token", async (req, res) => {
   try {
     const { token } = req.params;
-    if (!token) return res.status(400).json({ valid: false, error: "No token" });
-
     const { data: tk } = await supabase.from("register_tokens")
       .select("*").eq("token", token).single();
-
     if (!tk) return res.status(404).json({ valid: false, error: "Token not found" });
     if (new Date(tk.expires_at) < new Date())
       return res.status(400).json({ valid: false, error: "Token expired" });
-
     const { data: br } = await supabase.from("branches")
       .select("name").eq("id", tk.branch_id).single();
-
-    res.json({
-      valid: true,
-      branchId: tk.branch_id,
-      branchName: br?.name || tk.branch_id,
-    });
+    res.json({ valid: true, line_user_id: tk.line_user_id, branch_id: tk.branch_id, branchName: br?.name || tk.branch_id });
   } catch (e) { res.status(500).json({ valid: false, error: e.message }); }
 });
 
-// ─── Register submit ──────────────────────────────────────────
-app.post("/api/register/submit", async (req, res) => {
+app.get("/api/register/check", async (req, res) => {
   try {
-    const { token, plate, province, phone } = req.body;
-    if (!token || !plate) return res.status(400).json({ error: "token+plate required" });
-
-    const { data: tk } = await supabase.from("register_tokens").select().eq("token", token).single();
-    if (!tk || new Date(tk.expires_at) < new Date())
-      return res.status(400).json({ error: "Token หมดอายุหรือไม่ถูกต้อง" });
-
-    const { branch_id: branchId, line_user_id: userId } = tk;
-
-    await supabase.from("line_users").upsert(
-      { user_id: userId, plate, province: province||"", phone: phone||"", branch_id: branchId },
-      { onConflict: "user_id" }
-    );
-
-    const bay = await getFreeBay(branchId);
-    if (!bay) return res.status(400).json({ error: "ไม่มีช่องว่าง" });
-
-    const jobs = [{ name: "รับรถเข้า", duration: 5, status: "waiting" }];
-    await supabase.from("queue").insert({
-      branch_id: branchId, bay, plate,
-      province: province||"", phone: phone||"",
-      line_user_id: userId, bay_status: "waiting_entry", jobs,
-    });
-    await supabase.from("register_tokens").delete().eq("token", token);
-
-    const branchName = await getBranchName(branchId);
-    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
-    res.json({ success: true, bay });
+    const { plate, province } = req.query;
+    if (!plate || !province) return res.status(400).json({ error: "Missing params" });
+    const { data } = await supabase.from("line_users")
+      .select("user_id").eq("plate", plate.toUpperCase()).eq("province", province).single();
+    res.json({ registered: !!data, user_id: data?.user_id || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Quote Flex message ───────────────────────────────────────
-function quoteFlex({ plate, branchName, bay, items, note, total }) {
-  const fmt = (n) => Number(n).toLocaleString("th-TH");
-  return {
-    type: "flex", altText: `ใบเสนอราคา ${plate} — รวม ${fmt(total)} บาท`,
-    contents: {
-      type: "bubble",
-      header: {
-        type: "box", layout: "vertical", backgroundColor: "#1A1A1A", paddingAll: "16px",
-        contents: [
-          { type: "text", text: "📋 ใบเสนอราคา", color: "#FFE000", size: "xs", weight: "bold" },
-          { type: "text", text: plate, color: "#FFFFFF", size: "3xl", weight: "bold" },
-          { type: "text", text: `${branchName} · ช่องที่ ${bay}`, color: "#9ca3af", size: "sm" },
-        ],
-      },
-      body: {
-        type: "box", layout: "vertical", spacing: "md",
-        contents: [
-          { type: "box", layout: "vertical", backgroundColor: "#f9fafb",
-            cornerRadius: "8px", paddingAll: "12px",
-            contents: [
-              { type: "text", text: "รายการงาน", size: "xs", color: "#9ca3af", weight: "bold" },
-              ...items.map(it => ({
-                type: "box", layout: "horizontal", margin: "sm",
-                contents: [
-                  { type: "text", text: it.name, size: "sm", color: "#374151", flex: 3, wrap: true },
-                  { type: "text", text: `${fmt(it.price)} ฿`, size: "sm", color: "#1A1A1A",
-                    weight: "bold", align: "end", flex: 2 },
-                ],
-              })),
-              { type: "separator", margin: "md" },
-              { type: "box", layout: "horizontal", margin: "md",
-                contents: [
-                  { type: "text", text: "รวมทั้งสิ้น", size: "md", weight: "bold", color: "#1A1A1A", flex: 1 },
-                  { type: "text", text: `${fmt(total)} ฿`, size: "md", weight: "bold",
-                    color: "#059669", align: "end", flex: 1 },
-                ],
-              },
-            ],
-          },
-          ...(note ? [{ type: "text", text: `📝 ${note}`, size: "sm",
-            color: "#6b7280", wrap: true, margin: "sm" }] : []),
-          { type: "text", text: "ขอบคุณที่ใช้บริการ Cockpit 🙏",
-            size: "xs", color: "#9ca3af", align: "center", margin: "md" },
-        ],
-      },
-    },
-  };
-}
-
-app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
+app.post("/api/register/submit", async (req, res) => {
   try {
-    const { branchId, bay } = req.params;
-    const { plate, note, photoUrls } = req.body;
-    const row = await getQueueRow(branchId, bay);
-    const userId = row?.line_user_id;
-    if (!userId) return res.status(400).json({ error: "ลูกค้ายังไม่ได้ลงทะเบียน LINE" });
-    const branchName = await getBranchName(branchId);
-    const carPlate = plate || row?.plate;
-
-    // ส่งข้อความแจ้งก่อน
-    await push(userId, [{
+    const { token, plate, province, phone } = req.body;
+    if (!token || !plate) return res.status(400).json({ error: "token + plate required" });
+    const { data: tk } = await supabase.from("register_tokens")
+      .select("*").eq("token", token).single();
+    if (!tk || new Date(tk.expires_at) < new Date())
+      return res.status(400).json({ error: "Token หมดอายุหรือไม่ถูกต้อง" });
+    const { branch_id: branchId, line_user_id: userId } = tk;
+    await supabase.from("line_users").upsert(
+      { user_id: userId, plate: plate.toUpperCase(), province: province||"", phone: phone||"", branch_id: branchId },
+      { onConflict: "user_id" }
+    );
+    await supabase.from("register_tokens").delete().eq("token", token);
+    await linePush(branchId, userId, [{
       type: "text",
-      text: `📋 ใบเสนอราคาสำหรับ ${carPlate}\n📍 ${branchName} · ช่องที่ ${bay}\n\nช่างได้จัดทำใบเสนอราคาไว้ด้านล่างครับ 👇${note ? `\n\n📝 ${note}` : ""}`,
+      text: `✅ ลงทะเบียนสำเร็จ!\nทะเบียน: ${plate.toUpperCase()} ${province||""}\nระบบจะแจ้งเตือนเมื่อรถพร้อม 🚗`,
     }]);
-
-    // ส่งรูปใบเสนอราคา
-    for (const url of (photoUrls || []).slice(0, 5)) {
-      await push(userId, [{ type: "image", originalContentUrl: url, previewImageUrl: url }]);
-    }
-
-    console.log(`📋 Quote photo sent: ${carPlate} ${photoUrls?.length || 0} photos`);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // ADMIN OVERVIEW
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 app.get("/api/admin/overview", async (req, res) => {
   try {
-    const { data: branches } = await supabase.from("branches").select("*");
+    const { data: branches } = await supabase.from("branches").select("id, name, max_bays");
     const overview = await Promise.all((branches||[]).map(async br => {
       const { count } = await supabase.from("queue")
         .select("*", { count:"exact", head:true }).eq("branch_id", br.id);
-      return { branchId: br.id, name: br.name, activeQueues: count||0 };
+      return { branchId: br.id, name: br.name, maxBays: br.max_bays, activeQueues: count||0 };
     }));
     res.json({ overview });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // BRANCH DATA
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 app.get("/api/branch/:branchId", async (req, res) => {
   try {
     const { branchId } = req.params;
-    const { data: br } = await supabase.from("branches").select("*").eq("id", branchId).single();
+    const { data: br } = await supabase.from("branches")
+      .select("id, name, max_bays").eq("id", branchId).single();
     if (!br) return res.status(404).json({ error: "Branch not found" });
     const { data: rows } = await supabase.from("queue").select("*").eq("branch_id", branchId);
     const baysData = {};
     (rows||[]).forEach(r => {
       baysData[r.bay] = {
         plate: r.plate, province: r.province, phone: r.phone,
-        userId: r.line_user_id, bayStatus: r.bay_status,
-        jobs: r.jobs||[], startTime: r.start_time,
+        userId: r.line_user_id, bayStatus: r.bay_status||"waiting_entry",
+        jobs: r.jobs||[], startTime: r.start_time, createdAt: r.created_at,
       };
     });
-    res.json({ ...br, baysData });
+    res.json({ id: br.id, name: br.name, max_bays: br.max_bays, baysData });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Open bay ─────────────────────────────────────────────────
+// ── Open Bay (FIX: auto-lookup LINE user by plate+province) ────
 app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
-    const { plate, province, phone, userId } = req.body;
+    const { plate, province, phone, userId: passedUserId } = req.body;
     if (!plate) return res.status(400).json({ error: "plate required" });
+
+    // FIX: auto-lookup line_user_id by plate+province if not explicitly passed
+    let lineUserId = passedUserId || null;
+    if (!lineUserId && plate) {
+      lineUserId = await lookupLineUser(plate, province||"");
+      if (lineUserId) console.log(`[Open] Found LINE user for ${plate}: ${lineUserId}`);
+    }
+
     const jobs = [{ name:"รับรถเข้า", duration:5, status:"waiting" }];
     await supabase.from("queue").upsert(
-      { branch_id:branchId, bay, plate, province:province||"",
-        phone:phone||"", line_user_id:userId||null,
-        bay_status:"waiting_entry", jobs },
+      { branch_id:branchId, bay, plate:plate.toUpperCase(), province:province||"",
+        phone:phone||"", line_user_id:lineUserId, bay_status:"waiting_entry", jobs },
       { onConflict:"branch_id,bay" }
     );
-    if (userId) {
+
+    if (lineUserId) {
       const branchName = await getBranchName(branchId);
-      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
+      await linePush(branchId, lineUserId, [statusFlex({
+        plate: plate.toUpperCase(), branchName, bay, bayStatus:"waiting_entry", jobs,
+      })]);
+    } else {
+      console.log(`[Open] No LINE user for plate: ${plate} ${province}`);
     }
-    res.json({ success: true, bay });
+
+    res.json({ success: true, bay, lineUserId });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Start service ────────────────────────────────────────────
+// ── Start Service ──────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
     await supabase.from("queue")
-      .update({ bay_status:"in_service", start_time: new Date().toISOString() })
+      .update({ bay_status:"in_service", start_time:new Date().toISOString() })
       .eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })]);
+    await linePush(branchId, row.line_user_id, [statusFlex({
+      plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs,
+    })]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Update job ───────────────────────────────────────────────
+// ── Update Job Status ──────────────────────────────────────────
 app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
   try {
     const { branchId, bay, jobIdx } = req.params;
@@ -476,14 +444,20 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     const jobs = [...(row.jobs||[])];
     if (!jobs[+jobIdx]) return res.status(400).json({ error: "Invalid index" });
     jobs[+jobIdx] = { ...jobs[+jobIdx], status };
-    await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
+    const real = jobs.filter(j => j.name !== "รับรถเข้า");
+    const allDone = real.length > 0 && real.every(j => j.status === "done");
+    const updateData = { jobs };
+    if (allDone) updateData.bay_status = "done";
+    await supabase.from("queue").update(updateData).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
-    res.json({ success:true, jobs });
+    await linePush(branchId, row.line_user_id, [statusFlex({
+      plate:row.plate, branchName, bay, bayStatus: allDone?"done":row.bay_status, jobs,
+    })]);
+    res.json({ success: true, jobs, allDone });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Add jobs ─────────────────────────────────────────────────
+// ── Add Jobs ───────────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
@@ -496,30 +470,34 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
     const jobs = [...(row.jobs||[]), ...added];
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
-    res.json({ success:true, jobs });
+    await linePush(branchId, row.line_user_id, [statusFlex({
+      plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs,
+    })]);
+    res.json({ success: true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Remove job ───────────────────────────────────────────────
+// ── Remove Job ─────────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const { jobIdx, nonotify } = req.body;
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
-    const jobs = (row.jobs||[]).filter((_, i) => i !== +jobIdx);
-    if (!jobs.length) return res.status(400).json({ error: "Cannot remove all" });
+    const jobs = (row.jobs||[]).filter((_,i) => i !== +jobIdx);
+    if (!jobs.length) return res.status(400).json({ error: "Cannot remove all jobs" });
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     if (!nonotify) {
       const branchName = await getBranchName(branchId);
-      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
+      await linePush(branchId, row.line_user_id, [statusFlex({
+        plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs,
+      })]);
     }
-    res.json({ success:true, remainingJobs: jobs.length });
+    res.json({ success: true, remainingJobs: jobs.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Close / Cancel ───────────────────────────────────────────
+// ── Close / Cancel ─────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
@@ -528,38 +506,58 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Not found" });
     const branchName = await getBranchName(branchId);
     const doneJobs = (row.jobs||[]).map(j => ({ ...j, status:"done" }));
-
     await supabase.from("history").insert({
       branch_id:branchId, branch_name:branchName, bay,
       plate:row.plate, province:row.province, phone:row.phone,
       line_user_id:row.line_user_id, jobs:doneJobs,
-      closed_at: new Date().toISOString(), cancelled:!!nonotify,
+      closed_at:new Date().toISOString(), cancelled:!!nonotify,
     });
     await supabase.from("queue").delete().eq("branch_id", branchId).eq("bay", bay);
-    res.json({ success:true });
-
     if (!nonotify && row.line_user_id) {
-      await push(row.line_user_id, [statusFlex({
-        plate: row.plate, branchName, bay,
-        bayStatus: "done", jobs: doneJobs,
+      await linePush(branchId, row.line_user_id, [statusFlex({
+        plate:row.plate, branchName, bay, bayStatus:"done", jobs:doneJobs,
       })]);
     }
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Notify manual ────────────────────────────────────────────
+// ── Notify Manual ──────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })]);
-    res.json({ success:true });
+    await linePush(branchId, row.line_user_id, [statusFlex({
+      plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs,
+    })]);
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Send CockpitSure video ───────────────────────────────────
+// ── Quotation (Photos → LINE) ──────────────────────────────────
+app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { plate, note, photoUrls } = req.body;
+    const row = await getQueueRow(branchId, bay);
+    const userId = row?.line_user_id;
+    if (!userId) return res.status(400).json({ error: "ลูกค้ายังไม่ได้ลงทะเบียน LINE" });
+    const branchName = await getBranchName(branchId);
+    const carPlate = plate || row?.plate;
+    await linePush(branchId, userId, [{
+      type: "text",
+      text: `📋 ใบเสนอราคาสำหรับ ${carPlate}\n📍 ${branchName} · ช่องที่ ${bay}\n\nช่างได้จัดทำใบเสนอราคาไว้ด้านล่างครับ 👇${note?`\n\n📝 ${note}`:""}`,
+    }]);
+    for (const url of (photoUrls||[]).slice(0,5)) {
+      await linePush(branchId, userId, [{ type:"image", originalContentUrl:url, previewImageUrl:url }]);
+    }
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Send CockpitSure Video ─────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
@@ -567,114 +565,95 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
     const row = await getQueueRow(branchId, bay);
     const branchName = await getBranchName(branchId);
-    const userId = row?.line_user_id;
-
     await supabase.from("videos").insert({
       branch_id:branchId, branch_name:branchName,
-      plate: plate||row?.plate||"", province: row?.province||"",
-      video_url: videoUrl, uploaded_at: new Date().toISOString(),
+      plate:(plate||row?.plate||"").toUpperCase(),
+      province:row?.province||"",
+      video_url:videoUrl, uploaded_at:new Date().toISOString(),
     });
-
-    if (userId) {
-      await push(userId, [{
-        type:"text",
-        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
+    if (row?.line_user_id) {
+      await linePush(branchId, row.line_user_id, [{
+        type: "text",
+        text: `🎥 วีดีโอตรวจสภาพ CockpitSure\n🚗 ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลย\n${videoUrl}`,
       }]);
     }
-    res.json({ success:true });
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // HISTORY
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 app.get("/api/branch/:branchId/history", async (req, res) => {
   try {
     const { branchId } = req.params;
-    const { from, to, limit = 500 } = req.query;
-    let query = supabase.from("history")
-      .select("*").eq("branch_id", branchId)
-      .order("closed_at", { ascending: false })
-      .limit(+limit);
+    const { from, to, limit=500 } = req.query;
+    let query = supabase.from("history").select("*").eq("branch_id", branchId)
+      .order("closed_at", { ascending:false }).limit(+limit);
     if (from) query = query.gte("closed_at", new Date(from).toISOString());
-    if (to)   query = query.lte("closed_at", new Date(to + "T23:59:59").toISOString());
+    if (to)   query = query.lte("closed_at", new Date(to+"T23:59:59").toISOString());
     const { data, error } = await query;
     if (error) throw error;
     res.json({ history: data||[], branchId });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Reopen from history ──────────────────────────────────────
 app.post("/api/branch/:branchId/history/:historyId/reopen", async (req, res) => {
   try {
     const { branchId, historyId } = req.params;
     const { data: h } = await supabase.from("history")
       .select("*").eq("id", +historyId).eq("branch_id", branchId).single();
     if (!h) return res.status(404).json({ error: "ไม่พบข้อมูล" });
-
-    const isSameDay = new Date(h.closed_at).toDateString() === new Date().toDateString();
-    if (!isSameDay) return res.status(400).json({ error: "คืนสถานะได้เฉพาะวันเดียวกัน" });
-
-    const bay = await getFreeBay(branchId) || h.bay;
-    const { data: existing } = await supabase.from("queue")
-      .select("id").eq("branch_id", branchId).eq("bay", bay).single();
-    if (existing) return res.status(400).json({ error: "ช่องเต็ม ลองใหม่" });
-
-    const jobs = (h.jobs||[]).map(j =>
-      j.name === "รับรถเข้า" ? j : { ...j, status:"waiting" }
-    );
+    const { data: occupied } = await supabase.from("queue").select("bay").eq("branch_id", branchId);
+    const usedBays = (occupied||[]).map(r => r.bay);
+    let freeBay = null;
+    for (let i=1; i<=20; i++) { if (!usedBays.includes(String(i))) { freeBay=String(i); break; } }
+    if (!freeBay) return res.status(400).json({ error: "ไม่มีช่องว่าง" });
+    const jobs = (h.jobs||[]).map(j => j.name==="รับรถเข้า" ? j : { ...j, status:"waiting" });
     await supabase.from("queue").insert({
-      branch_id: branchId, bay,
-      plate: h.plate, province: h.province||"",
-      phone: h.phone||"", line_user_id: h.line_user_id,
-      bay_status: "waiting_entry", jobs,
-      created_at: new Date().toISOString(),
+      branch_id:branchId, bay:freeBay, plate:h.plate, province:h.province||"",
+      phone:h.phone||"", line_user_id:h.line_user_id,
+      bay_status:"waiting_entry", jobs, created_at:new Date().toISOString(),
     });
     await supabase.from("history").delete().eq("id", +historyId);
-    res.json({ success:true, bay });
+    res.json({ success: true, bay: freeBay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // VIDEOS
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 app.get("/api/branch/:branchId/videos", async (req, res) => {
   try {
     const { branchId } = req.params;
-    const { data } = await supabase.from("videos")
-      .select("*").eq("branch_id", branchId)
+    const { data } = await supabase.from("videos").select("*").eq("branch_id", branchId)
       .order("uploaded_at", { ascending:false }).limit(60);
     res.json({ videos: data||[], branchId });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE video by id (ลบจาก Supabase + Cloudinary)
 app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
   try {
     const { branchId, videoId } = req.params;
     const { data: v } = await supabase.from("videos")
       .select("video_url").eq("id", +videoId).eq("branch_id", branchId).single();
-
-    // ลบจาก Cloudinary
     if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
       const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-      if (match?.[1]) {
-        await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
-          .catch(e => console.error("Cloudinary delete:", e.message));
-      }
+      if (match?.[1]) await cloudinary.uploader.destroy(match[1], { resource_type:"video" })
+        .catch(e => console.error("Cloudinary delete:", e.message));
     }
-
-    // ลบจาก Supabase
-    const { error } = await supabase.from("videos")
-      .delete().eq("id", +videoId).eq("branch_id", branchId);
-    if (error) throw error;
+    await supabase.from("videos").delete().eq("id", +videoId).eq("branch_id", branchId);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ═══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // HEALTH
-// ═══════════════════════════════════════════════════════════════
-app.get("/", (req, res) => res.json({ status:"ok", db:"supabase", time: new Date().toISOString() }));
+// ══════════════════════════════════════════════════════════════
+app.get("/health", (req, res) => res.json({
+  status:"ok", ts:new Date().toISOString(),
+  env:{ supabase:!!process.env.SUPABASE_URL, cloudinary:!!process.env.CLOUDINARY_API_KEY, webapp:WEBAPP_URL },
+}));
+app.get("/", (req, res) => res.json({ status:"ok", db:"supabase", time:new Date().toISOString() }));
 
-app.listen(PORT, () => console.log(`✅ Cockpit Pro (Supabase) running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Cockpit Pro backend (Multi-LINE OA) running on port ${PORT}`));
