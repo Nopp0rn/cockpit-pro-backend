@@ -23,7 +23,7 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const WEBAPP_URL = process.env.WEBAPP_URL || "https://cockpit-pro-webapp-staging.vercel.app";
+const WEBAPP_URL = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
 
 // ── Middleware ─────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
