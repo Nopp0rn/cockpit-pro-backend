@@ -185,73 +185,44 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 // WEBHOOK
 // ═══════════════════════════════════════════════════════════════
 app.post("/webhook", async (req, res) => {
-  // ต้อง return 200 ก่อนเสมอ ไม่งั้น LINE จะ retry
+  const sig = req.headers["x-line-signature"];
+  const buf = req.body;
+  let branchId = null;
+
+  for (const key of Object.keys(process.env).filter(k => k.startsWith("LINE_SECRET_"))) {
+    const hash = crypto.createHmac("sha256", process.env[key]).update(buf).digest("base64");
+    if (hash === sig) { branchId = key.replace("LINE_SECRET_", ""); break; }
+  }
+  if (!branchId) return res.sendStatus(200);
   res.sendStatus(200);
 
-  try {
-    const sig = req.headers["x-line-signature"];
-    const buf = req.body;
-    let branchId = null;
+  let body; try { body = JSON.parse(buf.toString()); } catch { return; }
 
-    for (const key of Object.keys(process.env).filter(k => k.startsWith("LINE_SECRET_"))) {
-      const hash = crypto.createHmac("sha256", process.env[key]).update(buf).digest("base64");
-      if (hash === sig) { branchId = key.replace("LINE_SECRET_", ""); break; }
+  for (const ev of body.events || []) {
+    if (ev.type !== "message" || ev.message.type !== "text") continue;
+    const userId = ev.source.userId;
+    const text   = ev.message.text.trim().toUpperCase().replace(/\s+/g, "");
+    if (!/^[ก-ฮ0-9A-Z]{2,10}$/.test(text)) continue;
+
+    await supabase.from("line_users").upsert(
+      { user_id: userId, plate: text, branch_id: branchId },
+      { onConflict: "user_id" }
+    );
+
+    const token   = crypto.randomBytes(16).toString("hex");
+    const expires = new Date(Date.now() + 86400000).toISOString();
+    await supabase.from("register_tokens")
+      .insert({ token, branch_id: branchId, line_user_id: userId, expires_at: expires });
+
+    const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
+    const client = lineClient(branchId);
+    if (client) {
+      await client.replyMessage({
+        replyToken: ev.replyToken,
+        messages: [{ type: "text",
+          text: `🚗 ทะเบียน "${text}"\nกรุณาลงทะเบียนเพื่อเข้าคิว 👇\n${base}/register.html?token=${token}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` }],
+      });
     }
-    if (!branchId) {
-      console.log("[Webhook] Signature not matched — ignored");
-      return;
-    }
-
-    let body;
-    try { body = JSON.parse(buf.toString()); } catch { return; }
-
-    console.log(`[Webhook] Branch: ${branchId}, events: ${body.events?.length}`);
-
-    for (const ev of body.events || []) {
-      try {
-        if (ev.type !== "message" || ev.message?.type !== "text") continue;
-        const userId = ev.source?.userId;
-        const text   = ev.message.text.trim().toUpperCase().replace(/\s+/g, "");
-
-        console.log(`[Webhook] ${branchId} | userId: ${userId} | text: "${text}"`);
-
-        if (!/^[ก-ฮ0-9A-Z]{2,10}$/.test(text)) {
-          console.log(`[Webhook] Text "${text}" did not match plate regex — skipped`);
-          continue;
-        }
-
-        await supabase.from("line_users").upsert(
-          { user_id: userId, plate: text, branch_id: branchId },
-          { onConflict: "user_id" }
-        );
-
-        const token   = crypto.randomBytes(16).toString("hex");
-        const expires = new Date(Date.now() + 86400000).toISOString();
-        await supabase.from("register_tokens")
-          .insert({ token, branch_id: branchId, line_user_id: userId, expires_at: expires });
-
-        const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
-        const client = lineClient(branchId);
-        if (client) {
-          try {
-            await client.replyMessage({
-              replyToken: ev.replyToken,
-              messages: [{ type: "text",
-                text: `🚗 ทะเบียน "${text}"\nกรุณาลงทะเบียนเพื่อเข้าคิว 👇\n${base}/register.html?token=${token}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` }],
-            });
-            console.log(`[Webhook] Reply sent to ${userId} for plate ${text}`);
-          } catch (replyErr) {
-            console.error(`[Webhook] replyMessage failed:`, replyErr?.body || replyErr?.message);
-          }
-        } else {
-          console.error(`[Webhook] No LINE client for branch: ${branchId}`);
-        }
-      } catch (evErr) {
-        console.error(`[Webhook] Event error:`, evErr?.message);
-      }
-    }
-  } catch (err) {
-    console.error(`[Webhook] Fatal error:`, err?.message);
   }
 });
 
