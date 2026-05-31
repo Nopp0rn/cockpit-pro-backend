@@ -18,10 +18,24 @@ const supabase = createClient(
 
 // ── Cloudinary ────────────────────────────────────────────────
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || process.env.CLOUDINARY_CLOUD || "dnmzyoobh",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dnmzyoobh",
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
+// ── LINE (Single Centralized Bot) ─────────────────────────────
+// ใช้ LINE_TOKEN / LINE_SECRET เพียงตัวเดียว (ไม่ใช้ per-branch แล้ว)
+const lineClient = (() => {
+  const token = process.env.LINE_TOKEN;
+  if (!token) { console.warn("⚠️  LINE_TOKEN ไม่ได้ตั้งค่า — LINE push ถูกปิดใช้งาน"); return null; }
+  return new line.messagingApi.MessagingApiClient({ channelAccessToken: token });
+})();
+
+async function push(userId, messages) {
+  if (!lineClient || !userId) return;
+  try { await lineClient.pushMessage({ to: userId, messages }); }
+  catch (e) { console.error("LINE push error:", e.message); }
+}
 
 // ── Monthly video cleanup ─────────────────────────────────────
 async function cleanupOldVideos() {
@@ -42,7 +56,6 @@ async function cleanupOldVideos() {
 
     for (const v of oldVideos) {
       try {
-        // Extract Cloudinary public_id from URL
         const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
         if (match?.[1]) {
           await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
@@ -61,14 +74,13 @@ async function cleanupOldVideos() {
   }
 }
 
-// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7)
-// cron: '0 19 1 * *' = 02:00 Thailand (UTC 19:00 วันก่อน)
+// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
 cron.schedule("0 19 1 * *", () => {
   console.log("⏰ Monthly cleanup triggered");
   cleanupOldVideos();
 }, { timezone: "UTC" });
 
-console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น.)");
+console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น. ไทย)");
 
 
 // ── Middleware ────────────────────────────────────────────────
@@ -109,17 +121,12 @@ async function getQueueRow(branchId, bay) {
   return data;
 }
 
-// ── LINE ──────────────────────────────────────────────────────
-function lineClient(branchId) {
-  const token = process.env[`LINE_TOKEN_${branchId}`];
-  return token ? new line.messagingApi.MessagingApiClient({ channelAccessToken: token }) : null;
-}
-
-async function push(userId, messages, branchId) {
-  const client = lineClient(branchId);
-  if (!client || !userId) return;
-  try { await client.pushMessage({ to: userId, messages }); }
-  catch (e) { console.error("LINE:", e.message); }
+// ── ค้นหา branchId ของ LINE userId จากตาราง line_users ────────
+// ใช้สำหรับ Webhook แบบ single bot
+async function getBranchIdByUserId(userId) {
+  const { data } = await supabase.from("line_users")
+    .select("branch_id").eq("user_id", userId).single();
+  return data?.branch_id || null;
 }
 
 function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
@@ -182,19 +189,24 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBHOOK
+// WEBHOOK  (Single Centralized Bot)
 // ═══════════════════════════════════════════════════════════════
 app.post("/webhook", async (req, res) => {
-  const sig = req.headers["x-line-signature"];
-  const buf = req.body;
-  let branchId = null;
+  const sig    = req.headers["x-line-signature"];
+  const buf    = req.body;
+  const secret = process.env.LINE_SECRET;
 
-  for (const key of Object.keys(process.env).filter(k => k.startsWith("LINE_SECRET_"))) {
-    const hash = crypto.createHmac("sha256", process.env[key]).update(buf).digest("base64");
-    if (hash === sig) { branchId = key.replace("LINE_SECRET_", ""); break; }
+  // ── ตรวจสอบลายเซ็น ─────────────────────────────────────────
+  if (!secret) {
+    console.warn("⚠️  LINE_SECRET ไม่ได้ตั้งค่า");
+    return res.sendStatus(200);
   }
-  if (!branchId) return res.sendStatus(200);
-  res.sendStatus(200);
+  const hash = crypto.createHmac("sha256", secret).update(buf).digest("base64");
+  if (hash !== sig) {
+    console.warn("⚠️  LINE webhook signature ไม่ตรง — ละเว้น");
+    return res.sendStatus(200);
+  }
+  res.sendStatus(200); // ตอบ LINE ก่อนเสมอ
 
   let body; try { body = JSON.parse(buf.toString()); } catch { return; }
 
@@ -204,8 +216,12 @@ app.post("/webhook", async (req, res) => {
     const text   = ev.message.text.trim().toUpperCase().replace(/\s+/g, "");
     if (!/^[ก-ฮ0-9A-Z]{2,10}$/.test(text)) continue;
 
+    // ── ค้นหา branchId ที่ user เคยลงทะเบียนไว้ ───────────────
+    // ถ้ายังไม่มีประวัติ ให้ branch_id = null (จะ handle ใน register.html)
+    const branchId = await getBranchIdByUserId(userId);
+
     await supabase.from("line_users").upsert(
-      { user_id: userId, plate: text, branch_id: branchId },
+      { user_id: userId, plate: text, ...(branchId ? { branch_id: branchId } : {}) },
       { onConflict: "user_id" }
     );
 
@@ -214,10 +230,9 @@ app.post("/webhook", async (req, res) => {
     await supabase.from("register_tokens")
       .insert({ token, branch_id: branchId, line_user_id: userId, expires_at: expires });
 
-    const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
-    const client = lineClient(branchId);
-    if (client) {
-      await client.replyMessage({
+    const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp-staging.vercel.app";
+    if (lineClient) {
+      await lineClient.replyMessage({
         replyToken: ev.replyToken,
         messages: [{ type: "text",
           text: `🚗 ทะเบียน "${text}"\nกรุณาลงทะเบียนเพื่อเข้าคิว 👇\n${base}/register.html?token=${token}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` }],
@@ -250,7 +265,7 @@ app.get("/api/register/check", async (req, res) => {
   } catch (e) { res.status(500).json({ valid: false, error: e.message }); }
 });
 
-// ─── Validate token via path param: /api/register/:token (register.html format) ───
+// ─── Validate token via path param: /api/register/:token ───────
 app.get("/api/register/:token", async (req, res) => {
   try {
     const { token } = req.params;
@@ -303,7 +318,7 @@ app.post("/api/register/submit", async (req, res) => {
     await supabase.from("register_tokens").delete().eq("token", token);
 
     const branchName = await getBranchName(branchId);
-    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
+    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -359,7 +374,7 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     );
     if (userId) {
       const branchName = await getBranchName(branchId);
-      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
+      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
     }
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -375,7 +390,7 @@ app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
       .update({ bay_status:"in_service", start_time: new Date().toISOString() })
       .eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -392,7 +407,7 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     jobs[+jobIdx] = { ...jobs[+jobIdx], status };
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -410,7 +425,7 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
     const jobs = [...(row.jobs||[]), ...added];
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -427,7 +442,7 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     if (!nonotify) {
       const branchName = await getBranchName(branchId);
-      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
     }
     res.json({ success:true, remainingJobs: jobs.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -456,7 +471,7 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
       await push(row.line_user_id, [statusFlex({
         plate: row.plate, branchName, bay,
         bayStatus: "done", jobs: doneJobs,
-      })], branchId);
+      })]);
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -468,7 +483,7 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })]);
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -493,9 +508,39 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
       await push(userId, [{
         type:"text",
         text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
-      }], branchId);
+      }]);
     }
     res.json({ success:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Send quotation photos via LINE ──────────────────────────
+app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { imageUrls, message } = req.body;
+    if (!imageUrls?.length) return res.status(400).json({ error: "imageUrls required" });
+
+    const row = await getQueueRow(branchId, bay);
+    if (!row?.line_user_id) return res.status(400).json({ error: "ไม่พบ LINE user ของรถคันนี้" });
+
+    const branchName = await getBranchName(branchId);
+    const msgs = [];
+
+    // ส่งข้อความก่อน (ถ้ามี)
+    if (message) msgs.push({ type:"text", text: message });
+
+    // ส่งรูปภาพแต่ละรูป
+    for (const url of imageUrls) {
+      msgs.push({
+        type: "image",
+        originalContentUrl: url,
+        previewImageUrl:    url,
+      });
+    }
+
+    await push(row.line_user_id, msgs);
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -562,14 +607,12 @@ app.get("/api/branch/:branchId/videos", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE video by id (ลบจาก Supabase + Cloudinary)
 app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
   try {
     const { branchId, videoId } = req.params;
     const { data: v } = await supabase.from("videos")
       .select("video_url").eq("id", +videoId).eq("branch_id", branchId).single();
 
-    // ลบจาก Cloudinary
     if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
       const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
       if (match?.[1]) {
@@ -578,7 +621,6 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
       }
     }
 
-    // ลบจาก Supabase
     const { error } = await supabase.from("videos")
       .delete().eq("id", +videoId).eq("branch_id", branchId);
     if (error) throw error;
@@ -589,6 +631,11 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // HEALTH
 // ═══════════════════════════════════════════════════════════════
-app.get("/", (req, res) => res.json({ status:"ok", db:"supabase", time: new Date().toISOString() }));
+app.get("/", (req, res) => res.json({
+  status: "ok",
+  env:    process.env.NODE_ENV || "development",
+  db:     "supabase",
+  time:   new Date().toISOString(),
+}));
 
-app.listen(PORT, () => console.log(`✅ Cockpit Pro (Supabase) running on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Cockpit Pro (Single-Bot) running on port ${PORT}`));
