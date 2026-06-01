@@ -23,18 +23,45 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ── LINE (Single Centralized Bot) ─────────────────────────────
-// ใช้ LINE_TOKEN / LINE_SECRET เพียงตัวเดียว (ไม่ใช้ per-branch แล้ว)
-const lineClient = (() => {
-  const token = process.env.LINE_TOKEN;
-  if (!token) { console.warn("⚠️  LINE_TOKEN ไม่ได้ตั้งค่า — LINE push ถูกปิดใช้งาน"); return null; }
-  return new line.messagingApi.MessagingApiClient({ channelAccessToken: token });
-})();
+// ── LINE (Multi-Bot per Branch) ───────────────────────────────
+// ใช้ LINE_SECRET_BRXXX / LINE_TOKEN_BRXXX ต่อ branch
+// หาก branch ไม่มี token ของตัวเอง ให้ใช้ LINE_SECRET / LINE_TOKEN fallback
 
-async function push(userId, messages) {
-  if (!lineClient || !userId) return;
-  try { await lineClient.pushMessage({ to: userId, messages }); }
-  catch (e) { console.error("LINE push error:", e.message); }
+function getLineToken(branchId) {
+  const key = branchId ? `LINE_TOKEN_${branchId.toUpperCase()}` : null;
+  return (key && process.env[key]) || process.env.LINE_TOKEN || null;
+}
+
+function getLineSecret(branchId) {
+  const key = branchId ? `LINE_SECRET_${branchId.toUpperCase()}` : null;
+  return (key && process.env[key]) || process.env.LINE_SECRET || null;
+}
+
+function getLineClient(branchId) {
+  const token = getLineToken(branchId);
+  if (!token) {
+    console.warn(`⚠️  LINE_TOKEN ไม่พบสำหรับ branch ${branchId} — LINE push ถูกปิดใช้งาน`);
+    return null;
+  }
+  return new line.messagingApi.MessagingApiClient({ channelAccessToken: token });
+}
+
+async function push(userId, messages, branchId) {
+  if (!userId) return;
+  const client = getLineClient(branchId);
+  if (!client) return;
+  try { await client.pushMessage({ to: userId, messages }); }
+  catch (e) { console.error(`LINE push error (${branchId}):`, e.message); }
+}
+
+// ── ค้นหา branchId จาก line_users สำหรับ webhook reply ──────
+async function getBranchIdForWebhookReply(branchId, userId) {
+  // ถ้ารู้ branchId จาก webhook destination แล้วให้ใช้เลย
+  if (branchId) return branchId;
+  // fallback: ค้นจาก line_users
+  const { data } = await supabase.from("line_users")
+    .select("branch_id").eq("user_id", userId).single();
+  return data?.branch_id || null;
 }
 
 // ── Monthly video cleanup ─────────────────────────────────────
@@ -189,23 +216,48 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBHOOK  (Single Centralized Bot)
+// WEBHOOK  (Multi-Bot — verify ต่อ branch)
 // ═══════════════════════════════════════════════════════════════
 app.post("/webhook", async (req, res) => {
-  const sig    = req.headers["x-line-signature"];
-  const buf    = req.body;
-  const secret = process.env.LINE_SECRET;
+  const sig = req.headers["x-line-signature"];
+  const buf = req.body;
 
-  // ── ตรวจสอบลายเซ็น ─────────────────────────────────────────
-  if (!secret) {
-    console.warn("⚠️  LINE_SECRET ไม่ได้ตั้งค่า");
+  // ── หา branch ที่ตรงกับ signature ───────────────────────────
+  // โหลด secrets ทุก branch แล้วลอง verify ทีละตัว
+  let matchedBranchId = null;
+  let matchedSecret   = null;
+
+  // รวบรวม secrets ทั้งหมดจาก env
+  const branchSecrets = [];
+  // per-branch secrets (LINE_SECRET_BRXXX)
+  for (const [key, val] of Object.entries(process.env)) {
+    const m = key.match(/^LINE_SECRET_(.+)$/);
+    if (m && val) branchSecrets.push({ branchId: m[1], secret: val });
+  }
+  // fallback single secret
+  if (process.env.LINE_SECRET) {
+    branchSecrets.push({ branchId: null, secret: process.env.LINE_SECRET });
+  }
+
+  if (!branchSecrets.length) {
+    console.warn("⚠️  ไม่มี LINE_SECRET ใดตั้งค่าไว้");
     return res.sendStatus(200);
   }
-  const hash = crypto.createHmac("sha256", secret).update(buf).digest("base64");
-  if (hash !== sig) {
-    console.warn("⚠️  LINE webhook signature ไม่ตรง — ละเว้น");
+
+  for (const { branchId, secret } of branchSecrets) {
+    const hash = crypto.createHmac("sha256", secret).update(buf).digest("base64");
+    if (hash === sig) {
+      matchedBranchId = branchId;
+      matchedSecret   = secret;
+      break;
+    }
+  }
+
+  if (!matchedSecret) {
+    console.warn("⚠️  LINE webhook signature ไม่ตรงกับ branch ใดเลย — ละเว้น");
     return res.sendStatus(200);
   }
+
   res.sendStatus(200); // ตอบ LINE ก่อนเสมอ
 
   let body; try { body = JSON.parse(buf.toString()); } catch { return; }
@@ -217,22 +269,24 @@ app.post("/webhook", async (req, res) => {
     if (!/^[ก-ฮ0-9A-Z]{2,10}$/.test(text)) continue;
 
     // ── ค้นหา branchId ที่ user เคยลงทะเบียนไว้ ───────────────
-    // ถ้ายังไม่มีประวัติ ให้ branch_id = null (จะ handle ใน register.html)
-    const branchId = await getBranchIdByUserId(userId);
+    const existingBranchId = await getBranchIdByUserId(userId);
+    // ใช้ branchId จาก webhook ถ้ามี มิเช่นนั้นใช้จาก line_users
+    const branchIdForToken = matchedBranchId || existingBranchId;
 
     await supabase.from("line_users").upsert(
-      { user_id: userId, plate: text, ...(branchId ? { branch_id: branchId } : {}) },
+      { user_id: userId, plate: text, ...(existingBranchId ? { branch_id: existingBranchId } : {}) },
       { onConflict: "user_id" }
     );
 
     const token   = crypto.randomBytes(16).toString("hex");
     const expires = new Date(Date.now() + 86400000).toISOString();
     await supabase.from("register_tokens")
-      .insert({ token, branch_id: branchId, line_user_id: userId, expires_at: expires });
+      .insert({ token, branch_id: existingBranchId, line_user_id: userId, expires_at: expires });
 
     const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp-staging.vercel.app";
-    if (lineClient) {
-      await lineClient.replyMessage({
+    const replyClient = getLineClient(branchIdForToken);
+    if (replyClient) {
+      await replyClient.replyMessage({
         replyToken: ev.replyToken,
         messages: [{ type: "text",
           text: `🚗 ทะเบียน "${text}"\nกรุณาลงทะเบียนเพื่อเข้าคิว 👇\n${base}/register.html?token=${token}\n\n(ลิงก์ใช้ได้ 24 ชั่วโมง)` }],
@@ -318,7 +372,7 @@ app.post("/api/register/submit", async (req, res) => {
     await supabase.from("register_tokens").delete().eq("token", token);
 
     const branchName = await getBranchName(branchId);
-    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
+    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -374,7 +428,7 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     );
     if (userId) {
       const branchName = await getBranchName(branchId);
-      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })]);
+      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
     }
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -390,7 +444,7 @@ app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
       .update({ bay_status:"in_service", start_time: new Date().toISOString() })
       .eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })]);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })], branchId);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -407,7 +461,7 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     jobs[+jobIdx] = { ...jobs[+jobIdx], status };
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -425,7 +479,7 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
     const jobs = [...(row.jobs||[]), ...added];
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -442,7 +496,7 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
     if (!nonotify) {
       const branchName = await getBranchName(branchId);
-      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })]);
+      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
     }
     res.json({ success:true, remainingJobs: jobs.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -471,7 +525,7 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
       await push(row.line_user_id, [statusFlex({
         plate: row.plate, branchName, bay,
         bayStatus: "done", jobs: doneJobs,
-      })]);
+      })], branchId);
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -483,7 +537,7 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })]);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })], branchId);
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -508,7 +562,7 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
       await push(userId, [{
         type:"text",
         text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
-      }]);
+      }], branchId);
     }
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -539,7 +593,7 @@ app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
       });
     }
 
-    await push(row.line_user_id, msgs);
+    await push(row.line_user_id, msgs, branchId);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
