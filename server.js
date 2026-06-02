@@ -280,8 +280,10 @@ app.post("/webhook", async (req, res) => {
 
     const token   = crypto.randomBytes(16).toString("hex");
     const expires = new Date(Date.now() + 86400000).toISOString();
+    // FIX: ใช้ branchIdForToken (matchedBranchId || existingBranchId)
+    // เพื่อให้ user ใหม่ที่ยังไม่มีใน line_users ได้รับ branch_id ที่ถูกต้อง
     await supabase.from("register_tokens")
-      .insert({ token, branch_id: existingBranchId, line_user_id: userId, expires_at: expires });
+      .insert({ token, branch_id: branchIdForToken, line_user_id: userId, expires_at: expires });
 
     const base = process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app";
     const replyClient = getLineClient(branchIdForToken);
@@ -332,6 +334,10 @@ app.get("/api/register/:token", async (req, res) => {
     if (new Date(tk.expires_at) < new Date())
       return res.status(400).json({ valid: false, error: "Token expired" });
 
+
+    // FIX: ป้องกัน token เก่าที่มี branch_id = null
+    if (!tk.branch_id)
+      return res.status(400).json({ valid: false, error: "Token ไม่มีสาขา กรุณาขอลิงก์ใหม่" });
     const { data: br } = await supabase.from("branches")
       .select("name").eq("id", tk.branch_id).single();
 
@@ -354,6 +360,8 @@ app.post("/api/register/submit", async (req, res) => {
       return res.status(400).json({ error: "Token หมดอายุหรือไม่ถูกต้อง" });
 
     const { branch_id: branchId, line_user_id: userId } = tk;
+    // FIX: ป้องกัน branchId เป็น null (เกิดจาก bug เก่าที่ token ถูกสร้างโดยไม่มี branch_id)
+    if (!branchId) return res.status(400).json({ error: "ไม่พบสาขา กรุณาขอลิงก์ใหม่" });
 
     await supabase.from("line_users").upsert(
       { user_id: userId, plate, province: province||"", phone: phone||"", branch_id: branchId },
