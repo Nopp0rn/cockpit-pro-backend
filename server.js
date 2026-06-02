@@ -290,20 +290,19 @@ app.post("/webhook", async (req, res) => {
     const msgPayload = [{ type: "text", text: msgText }];
 
     // FIX: ใช้ pushMessage แทน replyMessage
-    // replyToken expire ใน 30 วินาที — ถ้า Render server wake up ช้า link จะไม่ถูกส่ง
-    // pushMessage ไม่มี time limit ดังนั้น token จะถูกส่งเสมอ
+    // replyToken expire ใน 30 วินาที — ถ้า Render server sleep แล้ว wake up ช้า link จะไม่ถูกส่ง
+    // pushMessage ใช้ userId โดยตรง ไม่มี time limit
     try {
       await push(userId, msgPayload, branchIdForToken);
     } catch (pushErr) {
       console.error(`❌ push register link failed (${branchIdForToken}):`, pushErr.message);
-      // Fallback: ลอง reply ถ้า push ล้มเหลว
       try {
         const replyClient = getLineClient(branchIdForToken);
         if (replyClient) {
           await replyClient.replyMessage({ replyToken: ev.replyToken, messages: msgPayload });
         }
       } catch (replyErr) {
-        console.error(`❌ reply register link also failed (${branchIdForToken}):`, replyErr.message);
+        console.error(`❌ reply fallback also failed (${branchIdForToken}):`, replyErr.message);
       }
     }
   }
@@ -372,6 +371,7 @@ app.post("/api/register/submit", async (req, res) => {
       return res.status(400).json({ error: "Token หมดอายุหรือไม่ถูกต้อง" });
 
     const { branch_id: branchId, line_user_id: userId } = tk;
+    // FIX: ป้องกัน branchId เป็น null (เกิดจาก bug เก่าที่ token ถูกสร้างโดยไม่มี branch_id)
     if (!branchId) return res.status(400).json({ error: "ไม่พบสาขา กรุณาขอลิงก์ใหม่" });
 
     await supabase.from("line_users").upsert(
@@ -550,4 +550,165 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
 });
 
 // ─── Notify manual ────────────────────────────────────────────
-app.post("/api/branch/:branchId/bay/:bay/notify"
+app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const row = await getQueueRow(branchId, bay);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    const branchName = await getBranchName(branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })], branchId);
+    res.json({ success:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Send CockpitSure video ───────────────────────────────────
+app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { videoUrl, plate } = req.body;
+    if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
+    const row = await getQueueRow(branchId, bay);
+    const branchName = await getBranchName(branchId);
+    const userId = row?.line_user_id;
+
+    await supabase.from("videos").insert({
+      branch_id:branchId, branch_name:branchName,
+      plate: plate||row?.plate||"", province: row?.province||"",
+      video_url: videoUrl, uploaded_at: new Date().toISOString(),
+    });
+
+    if (userId) {
+      await push(userId, [{
+        type:"text",
+        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
+      }], branchId);
+    }
+    res.json({ success:true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Send quotation photos via LINE ──────────────────────────
+app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
+  try {
+    const { branchId, bay } = req.params;
+    const { imageUrls, message } = req.body;
+    if (!imageUrls?.length) return res.status(400).json({ error: "imageUrls required" });
+
+    const row = await getQueueRow(branchId, bay);
+    if (!row?.line_user_id) return res.status(400).json({ error: "ไม่พบ LINE user ของรถคันนี้" });
+
+    const branchName = await getBranchName(branchId);
+    const msgs = [];
+
+    // ส่งข้อความก่อน (ถ้ามี)
+    if (message) msgs.push({ type:"text", text: message });
+
+    // ส่งรูปภาพแต่ละรูป
+    for (const url of imageUrls) {
+      msgs.push({
+        type: "image",
+        originalContentUrl: url,
+        previewImageUrl:    url,
+      });
+    }
+
+    await push(row.line_user_id, msgs, branchId);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// HISTORY
+// ═══════════════════════════════════════════════════════════════
+app.get("/api/branch/:branchId/history", async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const { from, to, limit = 500 } = req.query;
+    let query = supabase.from("history")
+      .select("*").eq("branch_id", branchId)
+      .order("closed_at", { ascending: false })
+      .limit(+limit);
+    if (from) query = query.gte("closed_at", new Date(from).toISOString());
+    if (to)   query = query.lte("closed_at", new Date(to + "T23:59:59").toISOString());
+    const { data, error } = await query;
+    if (error) throw error;
+    res.json({ history: data||[], branchId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Reopen from history ──────────────────────────────────────
+app.post("/api/branch/:branchId/history/:historyId/reopen", async (req, res) => {
+  try {
+    const { branchId, historyId } = req.params;
+    const { data: h } = await supabase.from("history")
+      .select("*").eq("id", +historyId).eq("branch_id", branchId).single();
+    if (!h) return res.status(404).json({ error: "ไม่พบข้อมูล" });
+
+    const isSameDay = new Date(h.closed_at).toDateString() === new Date().toDateString();
+    if (!isSameDay) return res.status(400).json({ error: "คืนสถานะได้เฉพาะวันเดียวกัน" });
+
+    const bay = await getFreeBay(branchId) || h.bay;
+    const { data: existing } = await supabase.from("queue")
+      .select("id").eq("branch_id", branchId).eq("bay", bay).single();
+    if (existing) return res.status(400).json({ error: "ช่องเต็ม ลองใหม่" });
+
+    const jobs = (h.jobs||[]).map(j =>
+      j.name === "รับรถเข้า" ? j : { ...j, status:"waiting" }
+    );
+    await supabase.from("queue").insert({
+      branch_id: branchId, bay,
+      plate: h.plate, province: h.province||"",
+      phone: h.phone||"", line_user_id: h.line_user_id,
+      bay_status: "waiting_entry", jobs,
+      created_at: new Date().toISOString(),
+    });
+    await supabase.from("history").delete().eq("id", +historyId);
+    res.json({ success:true, bay });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// VIDEOS
+// ═══════════════════════════════════════════════════════════════
+app.get("/api/branch/:branchId/videos", async (req, res) => {
+  try {
+    const { branchId } = req.params;
+    const { data } = await supabase.from("videos")
+      .select("*").eq("branch_id", branchId)
+      .order("uploaded_at", { ascending:false }).limit(60);
+    res.json({ videos: data||[], branchId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
+  try {
+    const { branchId, videoId } = req.params;
+    const { data: v } = await supabase.from("videos")
+      .select("video_url").eq("id", +videoId).eq("branch_id", branchId).single();
+
+    if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
+      const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+      if (match?.[1]) {
+        await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
+          .catch(e => console.error("Cloudinary delete:", e.message));
+      }
+    }
+
+    const { error } = await supabase.from("videos")
+      .delete().eq("id", +videoId).eq("branch_id", branchId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// HEALTH
+// ═══════════════════════════════════════════════════════════════
+app.get("/", (req, res) => res.json({
+  status: "ok",
+  env:    process.env.NODE_ENV || "development",
+  db:     "supabase",
+  time:   new Date().toISOString(),
+}));
+
+app.listen(PORT, () => console.log(`✅ Cockpit Pro (Multi-Bot) running on port ${PORT}`));
