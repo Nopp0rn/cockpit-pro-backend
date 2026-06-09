@@ -18,7 +18,7 @@ const supabase = createClient(
 
 // ── Cloudinary ────────────────────────────────────────────────
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dnmzyoobh",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dd7fg1swh",
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
