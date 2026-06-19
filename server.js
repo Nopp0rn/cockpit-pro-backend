@@ -604,12 +604,23 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     const branchName = await getBranchName(branchId);
     const userId = row?.line_user_id;
 
-    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
+    // Cloudinary สร้างภาพปกวีดีโอให้อัตโนมัติ โดยเปลี่ยนนามสกุลไฟล์เป็น .jpg
+    const previewUrl = videoUrl.replace(/\.(mp4|mov|webm)(\?.*)?$/i, ".jpg$2");
+
+    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง เป็น "วีดีโอ" ในแชท ไม่ใช่ลิงก์ไปหน้าเว็บภายนอก
+    // (LINE จะดึงไฟล์ไปแคชไว้ในระบบของ LINE เองตอนส่ง จึงลบจาก Cloudinary ได้ทันทีหลังจากนี้)
     if (userId) {
-      await push(userId, [{
-        type:"text",
-        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
-      }], branchId);
+      await push(userId, [
+        {
+          type: "text",
+          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n🚗 ทะเบียน: ${plate || row?.plate}\n📍 ${branchName}`,
+        },
+        {
+          type: "video",
+          originalContentUrl: videoUrl,
+          previewImageUrl: previewUrl,
+        },
+      ], branchId);
     }
 
     // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
