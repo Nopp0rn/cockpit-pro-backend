@@ -18,7 +18,7 @@ const supabase = createClient(
 
 // ── Cloudinary ────────────────────────────────────────────────
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dd7fg1swh",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dnmzyoobh",
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
@@ -64,6 +64,31 @@ async function getBranchIdForWebhookReply(branchId, userId) {
   return data?.branch_id || null;
 }
 
+// ── Daily cleanup: ลบข้อมูลลูกค้า (line_users, register_tokens) ──────────
+async function cleanupCustomerData() {
+  try {
+    console.log("🧹 Daily PDPA cleanup: ลบข้อมูลลูกค้าประจำวัน...");
+
+    // ลบ register_tokens ที่หมดอายุแล้ว
+    const { error: e1, count: c1 } = await supabase.from("register_tokens")
+      .delete({ count: "exact" })
+      .lt("expires_at", new Date().toISOString());
+    if (e1) console.error("register_tokens cleanup error:", e1.message);
+    else console.log(`  ✅ ลบ register_tokens หมดอายุ: ${c1||0} รายการ`);
+
+    // ลบ line_users ทั้งหมด (ไม่เก็บข้อมูลส่วนตัวลูกค้าค้างคืน)
+    const { error: e2, count: c2 } = await supabase.from("line_users")
+      .delete({ count: "exact" })
+      .not("user_id", "is", null);
+    if (e2) console.error("line_users cleanup error:", e2.message);
+    else console.log(`  ✅ ลบ line_users: ${c2||0} รายการ`);
+
+    console.log("✅ Daily PDPA cleanup เสร็จสมบูรณ์");
+  } catch (e) {
+    console.error("Daily cleanup error:", e.message);
+  }
+}
+
 // ── Monthly video cleanup ─────────────────────────────────────
 async function cleanupOldVideos() {
   try {
@@ -100,6 +125,14 @@ async function cleanupOldVideos() {
     console.error("Cleanup error:", e.message);
   }
 }
+
+// รัน Daily PDPA Cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
+cron.schedule("0 16 * * *", () => {
+  console.log("⏰ Daily PDPA cleanup triggered");
+  cleanupCustomerData();
+}, { timezone: "UTC" });
+
+console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens)");
 
 // รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
 cron.schedule("0 19 1 * *", () => {
@@ -561,7 +594,7 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Send CockpitSure video ───────────────────────────────────
+// ─── Send CockpitSure video (ส่งให้ลูกค้าแล้วลบทิ้ง — ไม่เก็บข้อมูลถาวร) ────
 app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
@@ -571,18 +604,27 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     const branchName = await getBranchName(branchId);
     const userId = row?.line_user_id;
 
-    await supabase.from("videos").insert({
-      branch_id:branchId, branch_name:branchName,
-      plate: plate||row?.plate||"", province: row?.province||"",
-      video_url: videoUrl, uploaded_at: new Date().toISOString(),
-    });
-
+    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
     if (userId) {
       await push(userId, [{
         type:"text",
         text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
       }], branchId);
     }
+
+    // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
+    if (process.env.CLOUDINARY_API_KEY) {
+      try {
+        const match = videoUrl.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+        if (match?.[1]) {
+          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
+          console.log(`🗑 ลบวีดีโอจาก Cloudinary แล้ว: ${match[1]}`);
+        }
+      } catch (e) {
+        console.error("Cloudinary delete after send:", e.message);
+      }
+    }
+
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
