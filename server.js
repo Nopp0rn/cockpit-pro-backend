@@ -89,6 +89,21 @@ async function cleanupCustomerData() {
   }
 }
 
+// ── Daily cleanup: ลบรูปใบเสนอราคาทั้งหมด (ไม่เก็บถาวร — PDPA) ──────────
+// ลบทั้งโฟลเดอร์ cockpit_quotes ทุกคืน 23:00 น. ไทย พร้อมกับ Daily PDPA cleanup
+async function cleanupQuotePhotos() {
+  try {
+    console.log("🧹 Daily cleanup: ลบรูปใบเสนอราคาทั้งหมด...");
+    const result = await cloudinary.api.delete_resources_by_prefix("cockpit_quotes/", {
+      resource_type: "image",
+    });
+    const count = Object.keys(result?.deleted || {}).length;
+    console.log(`  ✅ ลบรูปใบเสนอราคา: ${count} รายการ`);
+  } catch (e) {
+    console.error("Quote photos cleanup error:", e.message);
+  }
+}
+
 // ── Monthly video cleanup ─────────────────────────────────────
 async function cleanupOldVideos() {
   try {
@@ -130,9 +145,10 @@ async function cleanupOldVideos() {
 cron.schedule("0 16 * * *", () => {
   console.log("⏰ Daily PDPA cleanup triggered");
   cleanupCustomerData();
+  cleanupQuotePhotos();
 }, { timezone: "UTC" });
 
-console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens)");
+console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens + รูปใบเสนอราคา)");
 
 // รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
 cron.schedule("0 19 1 * *", () => {
@@ -604,23 +620,12 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     const branchName = await getBranchName(branchId);
     const userId = row?.line_user_id;
 
-    // Cloudinary สร้างภาพปกวีดีโอให้อัตโนมัติ โดยเปลี่ยนนามสกุลไฟล์เป็น .jpg
-    const previewUrl = videoUrl.replace(/\.(mp4|mov|webm)(\?.*)?$/i, ".jpg$2");
-
-    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง เป็น "วีดีโอ" ในแชท ไม่ใช่ลิงก์ไปหน้าเว็บภายนอก
-    // (LINE จะดึงไฟล์ไปแคชไว้ในระบบของ LINE เองตอนส่ง จึงลบจาก Cloudinary ได้ทันทีหลังจากนี้)
+    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
     if (userId) {
-      await push(userId, [
-        {
-          type: "text",
-          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n🚗 ทะเบียน: ${plate || row?.plate}\n📍 ${branchName}`,
-        },
-        {
-          type: "video",
-          originalContentUrl: videoUrl,
-          previewImageUrl: previewUrl,
-        },
-      ], branchId);
+      await push(userId, [{
+        type:"text",
+        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
+      }], branchId);
     }
 
     // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
@@ -667,6 +672,8 @@ app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
 
     await push(row.line_user_id, msgs, branchId);
     res.json({ success: true });
+    // หมายเหตุ: รูปใบเสนอราคาจะถูกลบทิ้งอัตโนมัติทุกคืน 23:00 น. ไทย
+    // (ดู cleanupQuotePhotos — รันพร้อม Daily PDPA cleanup) ไม่เก็บถาวร
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
