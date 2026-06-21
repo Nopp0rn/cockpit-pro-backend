@@ -755,8 +755,26 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// HEALTH
+// ADMIN: สั่ง cleanup ทันที (ไม่ต้องรอ cron 23:00 น.) — ใช้ครั้งเดียวตอนเปลี่ยน
+// retention หรือต้องการเคลียร์วีดีโอ/ข้อมูลเก่าเร่งด่วน
+// เรียกผ่าน browser/curl: GET หรือ POST /api/admin/cleanup-now?key=ADMIN_CLEANUP_KEY
 // ═══════════════════════════════════════════════════════════════
+app.all("/api/admin/cleanup-now", async (req, res) => {
+  const key = req.query.key || req.body?.key;
+  if (!process.env.ADMIN_CLEANUP_KEY || key !== process.env.ADMIN_CLEANUP_KEY) {
+    return res.status(403).json({ error: "ไม่ได้รับอนุญาต — key ไม่ถูกต้อง หรือยังไม่ตั้งค่า ADMIN_CLEANUP_KEY บน Render" });
+  }
+  // ตอบกลับทันทีก่อนรันจริง เพื่อไม่ให้ request timeout ถ้าข้อมูลเยอะ
+  res.json({
+    success: true,
+    message: "เริ่ม cleanup ในพื้นหลังแล้ว — ถ้าข้อมูลเยอะอาจใช้เวลาหลายนาที ดูความคืบหน้าได้ที่ Logs บน Render",
+  });
+  console.log("⏰ Manual cleanup-now triggered by admin");
+  cleanupCustomerData().catch(e => console.error("Manual cleanupCustomerData error:", e.message));
+  cleanupOldVideos().catch(e => console.error("Manual cleanupOldVideos error:", e.message));
+});
+
+
 app.get("/", (req, res) => res.json({
   status: "ok",
   env:    process.env.NODE_ENV || "development",
