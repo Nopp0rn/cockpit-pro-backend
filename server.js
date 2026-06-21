@@ -89,26 +89,11 @@ async function cleanupCustomerData() {
   }
 }
 
-// ── Daily cleanup: ลบรูปใบเสนอราคาทั้งหมด (ไม่เก็บถาวร — PDPA) ──────────
-// ลบทั้งโฟลเดอร์ cockpit_quotes ทุกคืน 23:00 น. ไทย พร้อมกับ Daily PDPA cleanup
-async function cleanupQuotePhotos() {
-  try {
-    console.log("🧹 Daily cleanup: ลบรูปใบเสนอราคาทั้งหมด...");
-    const result = await cloudinary.api.delete_resources_by_prefix("cockpit_quotes/", {
-      resource_type: "image",
-    });
-    const count = Object.keys(result?.deleted || {}).length;
-    console.log(`  ✅ ลบรูปใบเสนอราคา: ${count} รายการ`);
-  } catch (e) {
-    console.error("Quote photos cleanup error:", e.message);
-  }
-}
-
-// ── Monthly video cleanup ─────────────────────────────────────
+// ── Daily video cleanup (เก็บวีดีโอได้ 1 วัน) ──────────────────
 async function cleanupOldVideos() {
   try {
     const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - 1);
+    cutoff.setDate(cutoff.getDate() - 1);
     console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
 
     const { data: oldVideos, error } = await supabase.from("videos")
@@ -145,18 +130,17 @@ async function cleanupOldVideos() {
 cron.schedule("0 16 * * *", () => {
   console.log("⏰ Daily PDPA cleanup triggered");
   cleanupCustomerData();
-  cleanupQuotePhotos();
 }, { timezone: "UTC" });
 
-console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens + รูปใบเสนอราคา)");
+console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens)");
 
-// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
-cron.schedule("0 19 1 * *", () => {
-  console.log("⏰ Monthly cleanup triggered");
+// รัน Daily video cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
+cron.schedule("0 16 * * *", () => {
+  console.log("⏰ Daily video cleanup triggered");
   cleanupOldVideos();
 }, { timezone: "UTC" });
 
-console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น. ไทย)");
+console.log("✅ Daily video cleanup scheduled (ทุกวัน 23:00 น. ไทย — เก็บวีดีโอได้ 1 วัน)");
 
 
 // ── Middleware ────────────────────────────────────────────────
@@ -624,7 +608,7 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     if (userId) {
       await push(userId, [{
         type:"text",
-        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
+        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}\n\n⚠️ วีดีโอนี้มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ`,
       }], branchId);
     }
 
@@ -670,10 +654,14 @@ app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
       });
     }
 
+    // แจ้งเตือนอายุการเก็บวีดีโอ CockpitSure (1 วัน)
+    msgs.push({
+      type: "text",
+      text: "⚠️ วีดีโอผลการตรวจสภาพ CockpitSure มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ",
+    });
+
     await push(row.line_user_id, msgs, branchId);
     res.json({ success: true });
-    // หมายเหตุ: รูปใบเสนอราคาจะถูกลบทิ้งอัตโนมัติทุกคืน 23:00 น. ไทย
-    // (ดู cleanupQuotePhotos — รันพร้อม Daily PDPA cleanup) ไม่เก็บถาวร
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
