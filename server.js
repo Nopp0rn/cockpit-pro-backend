@@ -629,17 +629,18 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
       ], branchId);
     }
 
-    // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
-    if (process.env.CLOUDINARY_API_KEY) {
-      try {
-        const match = videoUrl.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-        if (match?.[1]) {
-          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
-          console.log(`🗑 ลบวีดีโอจาก Cloudinary แล้ว: ${match[1]}`);
-        }
-      } catch (e) {
-        console.error("Cloudinary delete after send:", e.message);
-      }
+    // บันทึกลง table videos เพื่อให้สาขาดู/โหลดได้จากเมนู "วิดีโอ" (ลบอัตโนมัติใน 1 วันโดย cron)
+    try {
+      await supabase.from("videos").insert({
+        branch_id: branchId,
+        branch_name: branchName,
+        plate: plate || row?.plate || "-",
+        province: row?.province || "",
+        video_url: videoUrl,
+        uploaded_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("บันทึก videos table ไม่สำเร็จ:", e.message);
     }
 
     res.json({ success:true });
