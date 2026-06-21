@@ -754,6 +754,43 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ลบวีดีโอ "ทั้งหมด" ของสาขานี้ในครั้งเดียว (ปุ่ม "ลบทั้งหมด" บนแดชบอร์ด)
+// ตอบกลับทันที แล้วลบจริงในพื้นหลัง กันกรณีมีวีดีโอเยอะจนเกิน request timeout
+app.delete("/api/branch/:branchId/videos", async (req, res) => {
+  const { branchId } = req.params;
+  try {
+    const { data: all, error: fetchErr } = await supabase.from("videos")
+      .select("id, video_url").eq("branch_id", branchId);
+    if (fetchErr) throw fetchErr;
+    const total = all?.length || 0;
+    if (!total) return res.json({ success: true, started: false, total: 0 });
+
+    res.json({ success: true, started: true, total });
+
+    (async () => {
+      let deleted = 0, failed = 0;
+      for (const v of all) {
+        try {
+          if (v.video_url && process.env.CLOUDINARY_API_KEY) {
+            const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+            if (match?.[1]) {
+              await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
+                .catch(e => console.error("Cloudinary delete:", e.message));
+            }
+          }
+          const { error } = await supabase.from("videos").delete().eq("id", v.id);
+          if (error) throw error;
+          deleted++;
+        } catch (e) {
+          console.error(`ลบไม่ได้ id=${v.id}:`, e.message);
+          failed++;
+        }
+      }
+      console.log(`🗑 ลบทั้งหมดของ ${branchId} เสร็จ: ลบ ${deleted}, ล้มเหลว ${failed}`);
+    })();
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // ADMIN: สั่ง cleanup ทันที (ไม่ต้องรอ cron 23:00 น.) — ใช้ครั้งเดียวตอนเปลี่ยน
 // retention หรือต้องการเคลียร์วีดีโอ/ข้อมูลเก่าเร่งด่วน
