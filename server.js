@@ -611,10 +611,22 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
 
     // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
     if (userId) {
-      await push(userId, [{
-        type:"text",
-        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}\n\n⚠️ วีดีโอนี้มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ`,
-      }], branchId);
+      // thumbnail JPEG จาก Cloudinary (screenshot ที่ 0s) ใช้เป็น previewImageUrl ของวีดีโอ
+      const thumbUrl = videoUrl
+        .replace("/upload/", "/upload/w_400,h_711,c_fill,so_0,q_70/")
+        .replace(/\.(webm|mp4|mov|avi)$/i, ".jpg");
+
+      await push(userId, [
+        {
+          type: "video",
+          originalContentUrl: videoUrl,
+          previewImageUrl: thumbUrl,
+        },
+        {
+          type: "text",
+          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n⚠️ วีดีโอนี้มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ`,
+        },
+      ], branchId);
     }
 
     // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
