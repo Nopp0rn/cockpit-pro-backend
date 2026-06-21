@@ -126,6 +126,25 @@ async function cleanupOldVideos() {
   }
 }
 
+// ── Daily history cleanup (เก็บ history ได้ 24 ชม. แล้วลบทั้งแถว) ──
+const HISTORY_RETENTION_DAYS = 1;
+async function cleanupOldHistory() {
+  try {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - HISTORY_RETENTION_DAYS);
+    console.log(`🧹 Auto-cleanup: ลบ history ก่อน ${cutoff.toLocaleDateString("th-TH")} (เก็บได้ ${HISTORY_RETENTION_DAYS} วัน)`);
+
+    const { error, count } = await supabase.from("history")
+      .delete({ count: "exact" })
+      .lt("closed_at", cutoff.toISOString());
+
+    if (error) { console.error("History cleanup error:", error.message); return; }
+    console.log(`✅ ลบ history เก่า: ${count||0} รายการ`);
+  } catch (e) {
+    console.error("History cleanup error:", e.message);
+  }
+}
+
 // รัน Daily PDPA Cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
 cron.schedule("0 16 * * *", () => {
   console.log("⏰ Daily PDPA cleanup triggered");
@@ -141,6 +160,14 @@ cron.schedule("0 16 * * *", () => {
 }, { timezone: "UTC" });
 
 console.log("✅ Daily video cleanup scheduled (ทุกวัน 23:00 น. ไทย — เก็บวีดีโอได้ 1 วัน)");
+
+// รัน Daily history cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
+cron.schedule("0 16 * * *", () => {
+  console.log("⏰ Daily history cleanup triggered");
+  cleanupOldHistory();
+}, { timezone: "UTC" });
+
+console.log(`✅ Daily history cleanup scheduled (ทุกวัน 23:00 น. ไทย — เก็บ history ได้ ${HISTORY_RETENTION_DAYS} วัน)`);
 
 
 // ── Middleware ────────────────────────────────────────────────
@@ -822,6 +849,7 @@ app.all("/api/admin/cleanup-now", async (req, res) => {
   console.log("⏰ Manual cleanup-now triggered by admin");
   cleanupCustomerData().catch(e => console.error("Manual cleanupCustomerData error:", e.message));
   cleanupOldVideos().catch(e => console.error("Manual cleanupOldVideos error:", e.message));
+  cleanupOldHistory().catch(e => console.error("Manual cleanupOldHistory error:", e.message));
 });
 
 
