@@ -626,6 +626,8 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
         .replace(/\.(mp4|mov|webm|m4v)$/i, ".jpg");
       // บังคับเป็น mp4 ให้ LINE เล่นได้เสมอ (Cloudinary transcode อัตโนมัติ)
       const playUrl = videoUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
+      // URL ดาวน์โหลด: fl_attachment บังคับให้เบราว์เซอร์ดาวน์โหลดไฟล์แทนการเล่น
+      const downloadUrl = playUrl.replace("/upload/", "/upload/fl_attachment:CockpitSure/");
 
       await push(userId, [
         {
@@ -634,8 +636,33 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
           previewImageUrl,
         },
         {
-          type: "text",
-          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n⏳ วีดีโอจะหมดอายุใน 24 ชั่วโมง`,
+          type: "flex",
+          altText: "🎥 วีดีโอผลการตรวจสภาพ CockpitSure",
+          contents: {
+            type: "bubble",
+            body: {
+              type: "box", layout: "vertical", spacing: "md",
+              contents: [
+                { type: "text", text: "🎥 วีดีโอผลการตรวจสภาพ CockpitSure",
+                  weight: "bold", size: "md", wrap: true, color: "#1A1A1A" },
+                { type: "box", layout: "vertical", spacing: "xs", contents: [
+                  { type: "text", text: `🚗 ทะเบียน: ${plate||row?.plate}`, size: "sm", color: "#555555", wrap: true },
+                  { type: "text", text: `📍 ${branchName}`, size: "sm", color: "#555555", wrap: true },
+                ]},
+                { type: "text", text: "⏳ วีดีโอจะหมดอายุใน 24 ชั่วโมง — กรุณาดาวน์โหลดเก็บไว้",
+                  size: "xs", color: "#e11d48", wrap: true },
+              ],
+            },
+            footer: {
+              type: "box", layout: "vertical", spacing: "sm",
+              contents: [
+                { type: "button", style: "primary", color: "#1A1A1A", height: "md",
+                  action: { type: "uri", label: "⬇️ ดาวน์โหลดเก็บวิดีโอ", uri: downloadUrl } },
+                { type: "text", text: "หรือกดค้างที่วิดีโอด้านบนเพื่อบันทึกลงเครื่อง",
+                  size: "xxs", color: "#9ca3af", wrap: true, align: "center" },
+              ],
+            },
+          },
         },
       ], branchId);
     }
