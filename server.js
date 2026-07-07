@@ -89,11 +89,11 @@ async function cleanupCustomerData() {
   }
 }
 
-// ── Daily video cleanup (เก็บวีดีโอได้ 1 วัน) ──────────────────
+// ── Monthly video cleanup ─────────────────────────────────────
 async function cleanupOldVideos() {
   try {
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 1);
+    cutoff.setMonth(cutoff.getMonth() - 1);
     console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
 
     const { data: oldVideos, error } = await supabase.from("videos")
@@ -126,25 +126,6 @@ async function cleanupOldVideos() {
   }
 }
 
-// ── Daily history cleanup (เก็บ history ได้ 24 ชม. แล้วลบทั้งแถว) ──
-const HISTORY_RETENTION_DAYS = 1;
-async function cleanupOldHistory() {
-  try {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - HISTORY_RETENTION_DAYS);
-    console.log(`🧹 Auto-cleanup: ลบ history ก่อน ${cutoff.toLocaleDateString("th-TH")} (เก็บได้ ${HISTORY_RETENTION_DAYS} วัน)`);
-
-    const { error, count } = await supabase.from("history")
-      .delete({ count: "exact" })
-      .lt("closed_at", cutoff.toISOString());
-
-    if (error) { console.error("History cleanup error:", error.message); return; }
-    console.log(`✅ ลบ history เก่า: ${count||0} รายการ`);
-  } catch (e) {
-    console.error("History cleanup error:", e.message);
-  }
-}
-
 // รัน Daily PDPA Cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
 cron.schedule("0 16 * * *", () => {
   console.log("⏰ Daily PDPA cleanup triggered");
@@ -153,30 +134,17 @@ cron.schedule("0 16 * * *", () => {
 
 console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens)");
 
-// รัน Daily video cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
-cron.schedule("0 16 * * *", () => {
-  console.log("⏰ Daily video cleanup triggered");
+// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
+cron.schedule("0 19 1 * *", () => {
+  console.log("⏰ Monthly cleanup triggered");
   cleanupOldVideos();
 }, { timezone: "UTC" });
 
-console.log("✅ Daily video cleanup scheduled (ทุกวัน 23:00 น. ไทย — เก็บวีดีโอได้ 1 วัน)");
-
-// รัน Daily history cleanup ทุกวัน 23:00 น. ไทย (UTC+7 → cron UTC 16:00)
-cron.schedule("0 16 * * *", () => {
-  console.log("⏰ Daily history cleanup triggered");
-  cleanupOldHistory();
-}, { timezone: "UTC" });
-
-console.log(`✅ Daily history cleanup scheduled (ทุกวัน 23:00 น. ไทย — เก็บ history ได้ ${HISTORY_RETENTION_DAYS} วัน)`);
+console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น. ไทย)");
 
 
 // ── Middleware ────────────────────────────────────────────────
 app.use(cors({ origin: "*" }));
-// กัน browser/iOS cache คำตอบ API เก่า (เช่น วิดีโอที่ลบไปแล้วโผล่มาใหม่ตอนรีเฟรช)
-app.use((req, res, next) => {
-  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
-  next();
-});
 app.use((req, res, next) => {
   req.path === "/webhook"
     ? express.raw({ type: "application/json" })(req, res, next)
@@ -638,36 +606,23 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
 
     // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
     if (userId) {
-      // thumbnail JPEG จาก Cloudinary (screenshot ที่ 0s) ใช้เป็น previewImageUrl ของวีดีโอ
-      const thumbUrl = videoUrl
-        .replace("/upload/", "/upload/w_400,h_711,c_fill,so_0,q_70/")
-        .replace(/\.(webm|mp4|mov|avi)$/i, ".jpg");
-
-      await push(userId, [
-        {
-          type: "video",
-          originalContentUrl: videoUrl,
-          previewImageUrl: thumbUrl,
-        },
-        {
-          type: "text",
-          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n⚠️ วีดีโอนี้มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ`,
-        },
-      ], branchId);
+      await push(userId, [{
+        type:"text",
+        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
+      }], branchId);
     }
 
-    // บันทึกลง table videos เพื่อให้สาขาดู/โหลดได้จากเมนู "วิดีโอ" (ลบอัตโนมัติใน 1 วันโดย cron)
-    try {
-      await supabase.from("videos").insert({
-        branch_id: branchId,
-        branch_name: branchName,
-        plate: plate || row?.plate || "-",
-        province: row?.province || "",
-        video_url: videoUrl,
-        uploaded_at: new Date().toISOString(),
-      });
-    } catch (e) {
-      console.error("บันทึก videos table ไม่สำเร็จ:", e.message);
+    // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
+    if (process.env.CLOUDINARY_API_KEY) {
+      try {
+        const match = videoUrl.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+        if (match?.[1]) {
+          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
+          console.log(`🗑 ลบวีดีโอจาก Cloudinary แล้ว: ${match[1]}`);
+        }
+      } catch (e) {
+        console.error("Cloudinary delete after send:", e.message);
+      }
     }
 
     res.json({ success:true });
@@ -698,12 +653,6 @@ app.post("/api/branch/:branchId/bay/:bay/quote", async (req, res) => {
         previewImageUrl:    url,
       });
     }
-
-    // แจ้งเตือนอายุการเก็บวีดีโอ CockpitSure (1 วัน)
-    msgs.push({
-      type: "text",
-      text: "⚠️ วีดีโอผลการตรวจสภาพ CockpitSure มีอายุการเก็บไว้ดูได้เพียง 1 วันเท่านั้น กรุณาบันทึก (เซฟ) วีดีโอเก็บไว้ในเครื่องของท่านนะครับ",
-    });
 
     await push(row.line_user_id, msgs, branchId);
     res.json({ success: true });
@@ -794,65 +743,9 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ลบวีดีโอ "ทั้งหมด" ของสาขานี้ในครั้งเดียว (ปุ่ม "ลบทั้งหมด" บนแดชบอร์ด)
-// ตอบกลับทันที แล้วลบจริงในพื้นหลัง กันกรณีมีวีดีโอเยอะจนเกิน request timeout
-app.delete("/api/branch/:branchId/videos", async (req, res) => {
-  const { branchId } = req.params;
-  try {
-    const { data: all, error: fetchErr } = await supabase.from("videos")
-      .select("id, video_url").eq("branch_id", branchId);
-    if (fetchErr) throw fetchErr;
-    const total = all?.length || 0;
-    if (!total) return res.json({ success: true, started: false, total: 0 });
-
-    res.json({ success: true, started: true, total });
-
-    (async () => {
-      let deleted = 0, failed = 0;
-      for (const v of all) {
-        try {
-          if (v.video_url && process.env.CLOUDINARY_API_KEY) {
-            const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-            if (match?.[1]) {
-              await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
-                .catch(e => console.error("Cloudinary delete:", e.message));
-            }
-          }
-          const { error } = await supabase.from("videos").delete().eq("id", v.id);
-          if (error) throw error;
-          deleted++;
-        } catch (e) {
-          console.error(`ลบไม่ได้ id=${v.id}:`, e.message);
-          failed++;
-        }
-      }
-      console.log(`🗑 ลบทั้งหมดของ ${branchId} เสร็จ: ลบ ${deleted}, ล้มเหลว ${failed}`);
-    })();
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // ═══════════════════════════════════════════════════════════════
-// ADMIN: สั่ง cleanup ทันที (ไม่ต้องรอ cron 23:00 น.) — ใช้ครั้งเดียวตอนเปลี่ยน
-// retention หรือต้องการเคลียร์วีดีโอ/ข้อมูลเก่าเร่งด่วน
-// เรียกผ่าน browser/curl: GET หรือ POST /api/admin/cleanup-now?key=ADMIN_CLEANUP_KEY
+// HEALTH
 // ═══════════════════════════════════════════════════════════════
-app.all("/api/admin/cleanup-now", async (req, res) => {
-  const key = req.query.key || req.body?.key;
-  if (!process.env.ADMIN_CLEANUP_KEY || key !== process.env.ADMIN_CLEANUP_KEY) {
-    return res.status(403).json({ error: "ไม่ได้รับอนุญาต — key ไม่ถูกต้อง หรือยังไม่ตั้งค่า ADMIN_CLEANUP_KEY บน Render" });
-  }
-  // ตอบกลับทันทีก่อนรันจริง เพื่อไม่ให้ request timeout ถ้าข้อมูลเยอะ
-  res.json({
-    success: true,
-    message: "เริ่ม cleanup ในพื้นหลังแล้ว — ถ้าข้อมูลเยอะอาจใช้เวลาหลายนาที ดูความคืบหน้าได้ที่ Logs บน Render",
-  });
-  console.log("⏰ Manual cleanup-now triggered by admin");
-  cleanupCustomerData().catch(e => console.error("Manual cleanupCustomerData error:", e.message));
-  cleanupOldVideos().catch(e => console.error("Manual cleanupOldVideos error:", e.message));
-  cleanupOldHistory().catch(e => console.error("Manual cleanupOldHistory error:", e.message));
-});
-
-
 app.get("/", (req, res) => res.json({
   status: "ok",
   env:    process.env.NODE_ENV || "development",
