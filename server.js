@@ -97,12 +97,12 @@ async function cleanupCustomerData() {
   }
 }
 
-// ── Monthly video cleanup ─────────────────────────────────────
+// ── Video cleanup: ลบวีดีโอที่เก่ากว่า 24 ชม. อัตโนมัติ (PDPA) ──
 async function cleanupOldVideos() {
   try {
     const cutoff = new Date();
-    cutoff.setMonth(cutoff.getMonth() - 1);
-    console.log(`🧹 Auto-cleanup: ลบวีดีโอก่อน ${cutoff.toLocaleDateString("th-TH")}`);
+    cutoff.setHours(cutoff.getHours() - 24);
+    console.log(`🧹 Auto-cleanup: ลบวีดีโอที่เก่ากว่า 24 ชม. (ก่อน ${cutoff.toLocaleString("th-TH")})`);
 
     const { data: oldVideos, error } = await supabase.from("videos")
       .select("id, video_url, plate, branch_id")
@@ -142,13 +142,13 @@ cron.schedule("0 16 * * *", () => {
 
 console.log("✅ Daily PDPA cleanup scheduled (ทุกวัน 23:00 น. ไทย — ลบ line_users + register_tokens)");
 
-// รัน Cleanup ทุกวันที่ 1 เวลา 02:00 น. (ไทย = UTC+7 → cron UTC 19:00)
-cron.schedule("0 19 1 * *", () => {
-  console.log("⏰ Monthly cleanup triggered");
+// รัน Video Cleanup ทุกชั่วโมง (ลบวีดีโอที่เก่ากว่า 24 ชม.)
+cron.schedule("0 * * * *", () => {
+  console.log("⏰ Hourly video cleanup triggered");
   cleanupOldVideos();
 }, { timezone: "UTC" });
 
-console.log("✅ Monthly video cleanup scheduled (วันที่ 1 ของทุกเดือน 02:00 น. ไทย)");
+console.log("✅ Video cleanup scheduled (ทุกชั่วโมง — ลบวีดีโอเก่ากว่า 24 ชม.)");
 
 
 // ── Middleware ────────────────────────────────────────────────
@@ -641,7 +641,21 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     }
 
     // ❗ ไม่ลบวิดีโอทันที — LINE ต้องดึงวิดีโอจาก URL ไปแคชก่อน
-    // ถ้าลบทันทีวิดีโอจะเล่นไม่ได้ → ปล่อยให้ cron PDPA ลบตอน 23:00 (เก่ากว่า 24 ชม.)
+    // ถ้าลบทันทีวิดีโอจะเล่นไม่ได้ → ปล่อยให้ cron ลบเมื่อครบ 24 ชม.
+
+    // บันทึกลงตาราง videos เพื่อให้แสดงในแท็บวีดีโอ (ดาวน์โหลดเก็บได้)
+    try {
+      await supabase.from("videos").insert({
+        branch_id:   branchId,
+        branch_name: branchName,
+        plate:       plate || row?.plate || null,
+        province:    row?.province || null,
+        video_url:   videoUrl,
+        uploaded_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("videos insert error:", e.message);
+    }
 
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
