@@ -18,7 +18,7 @@ const supabase = createClient(
 
 // ── Cloudinary ────────────────────────────────────────────────
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dnmzyoobh",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dd7fg1swh",
   api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
@@ -626,8 +626,14 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
         .replace(/\.(mp4|mov|webm|m4v)$/i, ".jpg");
       // บังคับเป็น mp4 ให้ LINE เล่นได้เสมอ (Cloudinary transcode อัตโนมัติ)
       const playUrl = videoUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
-      // URL ดาวน์โหลด: fl_attachment บังคับให้เบราว์เซอร์ดาวน์โหลดไฟล์แทนการเล่น
-      const downloadUrl = playUrl.replace("/upload/", "/upload/fl_attachment:CockpitSure/");
+      // URL ดาวน์โหลด: ใช้หน้า download.html (fetch→blob→save) เพราะ LINE in-app browser
+      // ส่วนใหญ่ไม่ยอม trigger การดาวน์โหลดจาก header ตรงๆ (fl_attachment เฉยๆ ใช้ไม่ได้กับ LINE webview)
+      const webappBase = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
+      const downloadUrl = `${webappBase}/download.html?`
+        + `url=${encodeURIComponent(playUrl)}`
+        + `&name=${encodeURIComponent(`CockpitSure_${plate||row?.plate||"video"}.mp4`)}`
+        + `&plate=${encodeURIComponent(plate||row?.plate||"")}`
+        + `&branch=${encodeURIComponent(branchName||"")}`;
 
       await push(userId, [
         {
@@ -658,7 +664,7 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
               contents: [
                 { type: "button", style: "primary", color: "#1A1A1A", height: "md",
                   action: { type: "uri", label: "⬇️ ดาวน์โหลดเก็บวิดีโอ", uri: downloadUrl } },
-                { type: "text", text: "หรือกดค้างที่วิดีโอด้านบนเพื่อบันทึกลงเครื่อง",
+                { type: "text", text: "จะเปิดหน้าดาวน์โหลด กดปุ่มอีกครั้งในหน้านั้นเพื่อบันทึก",
                   size: "xxs", color: "#9ca3af", wrap: true, align: "center" },
               ],
             },
