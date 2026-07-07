@@ -26,8 +26,10 @@ cloudinary.config({
 // ── Mascot (แสดงในการ์ดแจ้งเตือน LINE) ────────────────────────
 // วางไฟล์ mascot-card.png ไว้ใน public/ ของ frontend (Vercel) แล้ว deploy
 // หรือกำหนด MASCOT_URL ผ่าน ENV ก็ได้
+// หมายเหตุ: LINE cache รูป Flex ตาม URL — ถ้าเปลี่ยนรูปให้เพิ่มเลข ?v= เพื่อบังคับโหลดใหม่
+const MASCOT_VERSION = "1";
 const MASCOT_URL = process.env.MASCOT_URL
-  || `${(process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "")}/mascot-card.png`;
+  || `${(process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "")}/mascot-card.png?v=${MASCOT_VERSION}`;
 
 // ── LINE (Multi-Bot per Branch) ───────────────────────────────
 // ใช้ LINE_SECRET_BRXXX / LINE_TOKEN_BRXXX ต่อ branch
