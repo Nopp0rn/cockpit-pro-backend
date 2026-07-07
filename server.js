@@ -618,26 +618,30 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     const branchName = await getBranchName(branchId);
     const userId = row?.line_user_id;
 
-    // ส่งวีดีโอให้ลูกค้าทาง LINE โดยตรง (ไม่เก็บในฐานข้อมูล)
+    // ส่งวีดีโอให้ลูกค้าทาง LINE เป็น video message (เล่นในแชทได้เลย)
     if (userId) {
-      await push(userId, [{
-        type:"text",
-        text:`🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n👇 กดดูวีดีโอได้เลยครับ\n${videoUrl}`,
-      }], branchId);
+      // thumbnail = เฟรมแรกของวิดีโอ (Cloudinary so_0 → .jpg)
+      const previewImageUrl = videoUrl
+        .replace("/upload/", "/upload/so_0/")
+        .replace(/\.(mp4|mov|webm|m4v)$/i, ".jpg");
+      // บังคับเป็น mp4 ให้ LINE เล่นได้เสมอ (Cloudinary transcode อัตโนมัติ)
+      const playUrl = videoUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
+
+      await push(userId, [
+        {
+          type: "video",
+          originalContentUrl: playUrl,
+          previewImageUrl,
+        },
+        {
+          type: "text",
+          text: `🎥 วีดีโอผลการตรวจสภาพ CockpitSure\n🚗 ทะเบียน: ${plate||row?.plate}\n📍 ${branchName}\n\n⏳ วีดีโอจะหมดอายุใน 24 ชั่วโมง`,
+        },
+      ], branchId);
     }
 
-    // ลบออกจาก Cloudinary หลังส่งแล้ว (ไม่เก็บถาวร)
-    if (process.env.CLOUDINARY_API_KEY) {
-      try {
-        const match = videoUrl.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-        if (match?.[1]) {
-          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
-          console.log(`🗑 ลบวีดีโอจาก Cloudinary แล้ว: ${match[1]}`);
-        }
-      } catch (e) {
-        console.error("Cloudinary delete after send:", e.message);
-      }
-    }
+    // ❗ ไม่ลบวิดีโอทันที — LINE ต้องดึงวิดีโอจาก URL ไปแคชก่อน
+    // ถ้าลบทันทีวิดีโอจะเล่นไม่ได้ → ปล่อยให้ cron PDPA ลบตอน 23:00 (เก่ากว่า 24 ชม.)
 
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
