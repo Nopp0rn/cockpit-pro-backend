@@ -23,6 +23,12 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// ── Mascot (แสดงในการ์ดแจ้งเตือน LINE) ────────────────────────
+// วางไฟล์ mascot-card.png ไว้ใน public/ ของ frontend (Vercel) แล้ว deploy
+// หรือกำหนด MASCOT_URL ผ่าน ENV ก็ได้
+const MASCOT_URL = process.env.MASCOT_URL
+  || `${(process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "")}/mascot-card.png`;
+
 // ── LINE (Multi-Bot per Branch) ───────────────────────────────
 // ใช้ LINE_SECRET_BRXXX / LINE_TOKEN_BRXXX ต่อ branch
 // หาก branch ไม่มี token ของตัวเอง ให้ใช้ LINE_SECRET / LINE_TOKEN fallback
@@ -202,40 +208,46 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
     type: "flex", altText: `สถานะ ${plate} — ${st}`,
     contents: {
       type: "bubble",
+      size: "giga",
       header: {
-        type: "box", layout: "vertical", backgroundColor: "#1A1A1A", paddingAll: "16px",
+        type: "box", layout: "horizontal", backgroundColor: "#1A1A1A",
+        paddingAll: "18px", spacing: "md",
         contents: [
-          { type: "text", text: "🚗 Cockpit Pro – สถานะรถของคุณ", color: "#FFE000", size: "xs", weight: "bold" },
-          { type: "text", text: plate, color: "#FFFFFF", size: "3xl", weight: "bold" },
-          { type: "text", text: `${branchName} · ช่องที่ ${bay}`, color: "#9ca3af", size: "sm" },
+          { type: "box", layout: "vertical", flex: 3, justifyContent: "center", contents: [
+            { type: "text", text: "🚗 Cockpit Pro – สถานะรถของคุณ", color: "#FFE000", size: "xs", weight: "bold", wrap: true },
+            { type: "text", text: plate, color: "#FFFFFF", size: "3xl", weight: "bold" },
+            { type: "text", text: `${branchName} · ช่องที่ ${bay}`, color: "#9ca3af", size: "sm", wrap: true },
+          ]},
+          { type: "image", url: MASCOT_URL, flex: 2,
+            aspectMode: "fit", aspectRatio: "1:1.05", gravity: "bottom", align: "end" },
         ],
       },
       body: {
-        type: "box", layout: "vertical", spacing: "md",
+        type: "box", layout: "vertical", spacing: "lg", paddingAll: "20px",
         contents: [
           { type: "box", layout: "horizontal", contents: [
-            { type: "text", text: st, color: col, weight: "bold", size: "md", flex: 1 },
-            { type: "text", text: `${pct}%`, color: col, weight: "bold", size: "md", align: "end" },
+            { type: "text", text: st, color: col, weight: "bold", size: "lg", flex: 1 },
+            { type: "text", text: `${pct}%`, color: col, weight: "bold", size: "lg", align: "end" },
           ]},
           ...(real.length ? [{
             type: "box", layout: "vertical", backgroundColor: "#f3f4f6",
-            cornerRadius: "8px", paddingAll: "12px",
+            cornerRadius: "8px", paddingAll: "14px",
             contents: [
-              { type: "text", text: "รายการงาน", size: "xs", color: "#9ca3af", weight: "bold" },
+              { type: "text", text: "รายการงาน", size: "sm", color: "#9ca3af", weight: "bold" },
               ...real.map(j => ({
-                type: "box", layout: "horizontal", margin: "sm",
+                type: "box", layout: "horizontal", margin: "md",
                 contents: [
-                  { type: "text", size: "sm", flex: 0,
+                  { type: "text", size: "md", flex: 0,
                     text: j.status==="done"?"✅":j.status==="in_progress"?"🔧":"⏳" },
-                  { type: "text", text: j.name, size: "sm", flex: 1, margin: "sm",
+                  { type: "text", text: j.name, size: "md", flex: 1, margin: "sm",
                     decoration: j.status==="done"?"line-through":"none",
                     color: j.status==="done"?"#9ca3af":"#1A1A1A" },
-                  { type: "text", text: `${j.duration} นาที`, size: "xs", color: "#9ca3af", align: "end" },
+                  { type: "text", text: `${j.duration} นาที`, size: "sm", color: "#9ca3af", align: "end" },
                 ],
               })),
             ],
           }] : []),
-          { type: "text", text: "ขอบคุณที่ใช้บริการ Cockpit 🙏", size: "xs", color: "#9ca3af", align: "center" },
+          { type: "text", text: "ขอบคุณที่ใช้บริการ Cockpit 🙏", size: "sm", color: "#9ca3af", align: "center" },
           ...(bayStatus === "done" ? [{
             type: "text",
             text: "งานเสร็จเรียบร้อย\nหากท่านอยู่ในสาขากรุณารอสักครู่\nพนักงานจะไปพบท่านเพื่อชำระสินค้าและบริการ",
