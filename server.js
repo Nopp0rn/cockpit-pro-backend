@@ -608,6 +608,42 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Video compression + iOS-safe delivery ──────────────────────────
+// เดิม: rename นามสกุลเป็น .mp4 เฉยๆ แล้วปล่อยให้ Cloudinary auto-transcode
+// ตอน request แรก — ไฟล์ใหญ่ + transcode ครั้งแรกช้า ทำให้ iOS Safari
+// (timeout ไวกว่า) โหลดวิดีโอไม่ขึ้นเป็นบางเครื่อง แก้โดย:
+//   1. แทรก transformation บีบ bitrate/บังคับ codec h264+aac ที่เข้ากับ LINE/iOS
+//   2. "อุ่น" URL ด้วย GET request จากฝั่ง server ก่อนส่งลิงก์ให้ลูกค้า
+//      เพื่อให้ Cloudinary transcode เสร็จและแคชไว้แล้ว ลูกค้าเปิดแล้วเล่นได้ทันที
+const VIDEO_MAX_BITRATE_KBPS = parseInt(process.env.VIDEO_MAX_BITRATE_KBPS || "600", 10);
+
+function buildOptimizedVideoUrl(originalUrl) {
+  if (!originalUrl) return originalUrl;
+  const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
+  const transform = `q_auto:low,vc_h264,ac_aac,br_${VIDEO_MAX_BITRATE_KBPS}k`;
+  return mp4Url.replace("/upload/", `/upload/${transform}/`);
+}
+
+function buildThumbnailUrl(originalUrl) {
+  if (!originalUrl) return originalUrl;
+  const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
+  return mp4Url.replace("/upload/", "/upload/so_0/").replace(/\.mp4$/i, ".jpg");
+}
+
+async function warmVideoUrl(url, timeoutMs = 25000) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const resp = await fetch(url, { method: "GET", signal: controller.signal });
+    clearTimeout(timer);
+    if (!resp.ok) console.warn(`⚠️  warmVideoUrl: HTTP ${resp.status} — ${url}`);
+    else console.log(`✅ warmVideoUrl: transcode พร้อมแล้ว (${url.split("/upload/")[1]?.split("/")[0]})`);
+  } catch (e) {
+    // ไม่ throw — ถ้า warm ไม่สำเร็จก็ปล่อยให้ Cloudinary transcode ตอน LINE ดึงเองแทน
+    console.warn(`⚠️  warmVideoUrl timeout/error: ${e.message}`);
+  }
+}
+
 // ─── Send CockpitSure video (ส่งให้ลูกค้าแล้วลบทิ้ง — ไม่เก็บข้อมูลถาวร) ────
 app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
   try {
@@ -620,12 +656,12 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
 
     // ส่งวีดีโอให้ลูกค้าทาง LINE เป็น video message (เล่นในแชทได้เลย)
     if (userId) {
-      // thumbnail = เฟรมแรกของวิดีโอ (Cloudinary so_0 → .jpg)
-      const previewImageUrl = videoUrl
-        .replace("/upload/", "/upload/so_0/")
-        .replace(/\.(mp4|mov|webm|m4v)$/i, ".jpg");
-      // บังคับเป็น mp4 ให้ LINE เล่นได้เสมอ (Cloudinary transcode อัตโนมัติ)
-      const playUrl = videoUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
+      // playUrl = mp4/h264/aac ที่บีบอัดแล้ว (≤ ~600kbps) — เล็กลง + เล่นได้บน iOS/LINE แน่นอน
+      const playUrl = buildOptimizedVideoUrl(videoUrl);
+      const previewImageUrl = buildThumbnailUrl(videoUrl);
+
+      // อุ่นแคช Cloudinary ก่อนส่งลิงก์ — กัน iOS โหลดไม่ขึ้นตอน transcode ครั้งแรก
+      await warmVideoUrl(playUrl);
       // URL ดาวน์โหลด: ใช้หน้า download.html (fetch→blob→save) เพราะ LINE in-app browser
       // ส่วนใหญ่ไม่ยอม trigger การดาวน์โหลดจาก header ตรงๆ (fl_attachment เฉยๆ ใช้ไม่ได้กับ LINE webview)
       const webappBase = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
@@ -677,13 +713,14 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     // ถ้าลบทันทีวิดีโอจะเล่นไม่ได้ → ปล่อยให้ cron ลบเมื่อครบ 24 ชม.
 
     // บันทึกลงตาราง videos เพื่อให้แสดงในแท็บวีดีโอ (ดาวน์โหลดเก็บได้)
+    // เก็บ URL ที่บีบอัดแล้ว (playUrl) แทน videoUrl ดิบ — เล่น/โหลดในแท็บวีดีโอเร็วขึ้นด้วย
     try {
       await supabase.from("videos").insert({
         branch_id:   branchId,
         branch_name: branchName,
         plate:       plate || row?.plate || null,
         province:    row?.province || null,
-        video_url:   videoUrl,
+        video_url:   buildOptimizedVideoUrl(videoUrl),
         uploaded_at: new Date().toISOString(),
       });
     } catch (e) {
