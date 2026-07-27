@@ -448,11 +448,19 @@ app.post("/api/register/submit", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 app.get("/api/admin/overview", async (req, res) => {
   try {
-    const { data: branches } = await supabase.from("branches").select("*");
-    const overview = await Promise.all((branches||[]).map(async br => {
-      const { count } = await supabase.from("queue")
-        .select("*", { count:"exact", head:true }).eq("branch_id", br.id);
-      return { branchId: br.id, name: br.name, activeQueues: count||0 };
+    // 2026-07-27 (ลดโควตา Supabase):
+    //   เดิมวน count ทีละสาขา = ยิง Supabase 1 ครั้งต่อสาขา (16 สาขา = 16 request ต่อการเรียก 1 ครั้ง)
+    //   หน้ารวมสาขา refresh ทุก 15 วิ จึงกลายเป็นทราฟฟิกก้อนใหญ่ที่สุดของโปรเจกต์
+    //   เปลี่ยนเป็นดึง branch_id ของคิวทั้งหมดครั้งเดียวแล้วนับในหน่วยความจำ → 16 request เหลือ 1
+    //   (ตาราง queue มีไม่กี่สิบแถว payload เล็กกว่าเดิมมาก)
+    const [{ data: branches }, { data: qrows }] = await Promise.all([
+      supabase.from("branches").select("id,name"),
+      supabase.from("queue").select("branch_id"),
+    ]);
+    const counts = {};
+    (qrows||[]).forEach(r => { counts[r.branch_id] = (counts[r.branch_id]||0) + 1; });
+    const overview = (branches||[]).map(br => ({
+      branchId: br.id, name: br.name, activeQueues: counts[br.id]||0,
     }));
     res.json({ overview });
   } catch (e) { res.status(500).json({ error: e.message }); }
