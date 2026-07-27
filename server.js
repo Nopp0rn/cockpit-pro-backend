@@ -68,7 +68,7 @@ async function getBranchIdForWebhookReply(branchId, userId) {
   if (branchId) return branchId;
   // fallback: ค้นจาก line_users
   const { data } = await supabase.from("line_users")
-    .select("branch_id").eq("user_id", userId).single();
+    .select("branch_id").eq("user_id", userId).maybeSingle();
   return data?.branch_id || null;
 }
 
@@ -185,7 +185,7 @@ async function getBranchName(branchId) {
 
 async function getQueueRow(branchId, bay) {
   const { data } = await supabase.from("queue")
-    .select("*").eq("branch_id", branchId).eq("bay", bay).single();
+    .select("*").eq("branch_id", branchId).eq("bay", bay).maybeSingle();
   return data;
 }
 
@@ -193,7 +193,7 @@ async function getQueueRow(branchId, bay) {
 // ใช้สำหรับ Webhook แบบ single bot
 async function getBranchIdByUserId(userId) {
   const { data } = await supabase.from("line_users")
-    .select("branch_id").eq("user_id", userId).single();
+    .select("branch_id").eq("user_id", userId).maybeSingle();
   return data?.branch_id || null;
 }
 
@@ -362,7 +362,7 @@ app.get("/api/register/check", async (req, res) => {
     if (!token) return res.status(400).json({ valid: false, error: "No token" });
 
     const { data: tk } = await supabase.from("register_tokens")
-      .select("*").eq("token", token).single();
+      .select("*").eq("token", token).maybeSingle();
 
     if (!tk) return res.status(404).json({ valid: false, error: "Token not found" });
     if (new Date(tk.expires_at) < new Date())
@@ -386,7 +386,7 @@ app.get("/api/register/:token", async (req, res) => {
     if (!token) return res.status(400).json({ valid: false, error: "No token" });
 
     const { data: tk } = await supabase.from("register_tokens")
-      .select("*").eq("token", token).single();
+      .select("*").eq("token", token).maybeSingle();
 
     if (!tk) return res.status(404).json({ valid: false, error: "Token not found" });
     if (new Date(tk.expires_at) < new Date())
@@ -413,7 +413,7 @@ app.post("/api/register/submit", async (req, res) => {
     const { token, plate, province, phone } = req.body;
     if (!token || !plate) return res.status(400).json({ error: "token+plate required" });
 
-    const { data: tk } = await supabase.from("register_tokens").select().eq("token", token).single();
+    const { data: tk } = await supabase.from("register_tokens").select().eq("token", token).maybeSingle();
     if (!tk || new Date(tk.expires_at) < new Date())
       return res.status(400).json({ error: "Token หมดอายุหรือไม่ถูกต้อง" });
 
@@ -814,7 +814,7 @@ app.post("/api/branch/:branchId/history/:historyId/reopen", async (req, res) => 
 
     const bay = await getFreeBay(branchId) || h.bay;
     const { data: existing } = await supabase.from("queue")
-      .select("id").eq("branch_id", branchId).eq("bay", bay).single();
+      .select("id").eq("branch_id", branchId).eq("bay", bay).maybeSingle();
     if (existing) return res.status(400).json({ error: "ช่องเต็ม ลองใหม่" });
 
     const jobs = (h.jobs||[]).map(j =>
