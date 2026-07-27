@@ -472,9 +472,21 @@ app.get("/api/admin/overview", async (req, res) => {
 app.get("/api/branch/:branchId", async (req, res) => {
   try {
     const { branchId } = req.params;
-    const { data: br } = await supabase.from("branches").select("*").eq("id", branchId).single();
+    // 2026-07-27 (ลดโควตา Supabase):
+    //   เดิมหน้าจอคิวเรียก 2 endpoint ทุกรอบ (branch + history?limit=50)
+    //   ทั้งที่ history เอาไปใช้แค่ "ของวันนี้" เพื่อโชว์ปุ่มคืนสถานะ
+    //   จึงรวมมาไว้ใน response เดียว และให้ Postgres กรองเฉพาะวันนี้ตั้งแต่ต้นทาง
+    //   ผล: request ต่อรอบลดครึ่ง + payload เล็กลงมาก (เดิมดึง 50 แถวข้ามวัน)
+    const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
+    const [{ data: br }, { data: rows }, { data: hist }] = await Promise.all([
+      supabase.from("branches").select("*").eq("id", branchId).single(),
+      supabase.from("queue").select("*").eq("branch_id", branchId),
+      supabase.from("history").select("*")
+        .eq("branch_id", branchId)
+        .gte("closed_at", startOfToday.toISOString())
+        .order("closed_at", { ascending: false }),
+    ]);
     if (!br) return res.status(404).json({ error: "Branch not found" });
-    const { data: rows } = await supabase.from("queue").select("*").eq("branch_id", branchId);
     const baysData = {};
     (rows||[]).forEach(r => {
       baysData[r.bay] = {
@@ -483,7 +495,8 @@ app.get("/api/branch/:branchId", async (req, res) => {
         jobs: r.jobs||[], startTime: r.start_time,
       };
     });
-    res.json({ ...br, baysData });
+    const todayHistory = (hist||[]).filter(h => !h.cancelled);
+    res.json({ ...br, baysData, todayHistory });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
