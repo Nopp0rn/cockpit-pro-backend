@@ -8,6 +8,32 @@ const { v2: cloudinary } = require("cloudinary");
 const cron     = require("node-cron");
 
 const app  = express();
+
+// ─── Micro-cache ลดโควตา Supabase (2026-07-28) ─────────────────────────────
+//   ปัญหา: หน้าจอคิวหลายเครื่องที่เปิดสาขาเดียวกัน ต่างคนต่าง poll
+//          ทำให้ยิง Supabase ซ้ำด้วยข้อมูลชุดเดียวกันหลายรอบต่อวินาที
+//   วิธี:  พักคำตอบไว้ในหน่วยความจำแป๊บหนึ่ง ถ้ามีคำขอเดิมเข้ามาในช่วงนั้นก็ใช้ของเดิมตอบ
+//          → หลายเครื่องยุบเหลือ query เดียว โดยข้อมูลยังสดในระดับวินาที
+const _cache = new Map();
+async function cached(key, ttlMs, producer) {
+  const now = Date.now();
+  const hit = _cache.get(key);
+  if (hit && hit.exp && now < hit.exp) return hit.val;
+  if (hit && hit.pending) return hit.pending;          // มีคำขอเดิมวิ่งอยู่ รอผลอันเดียวกัน
+  const pending = (async () => {
+    const val = await producer();
+    _cache.set(key, { val, exp: Date.now() + ttlMs });
+    return val;
+  })();
+  _cache.set(key, { pending });
+  return pending;
+}
+// ล้าง cache ของสาขาเมื่อข้อมูลเปลี่ยน เพื่อให้เห็นผลทันทีไม่ต้องรอ TTL
+function invalidateBranch(branchId) {
+  _cache.delete(`branch:${branchId}`);
+  _cache.delete("overview");
+}
+
 const PORT = process.env.PORT || 3001;
 
 // ── Supabase ───────────────────────────────────────────────────
@@ -266,6 +292,7 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
 // WEBHOOK  (Multi-Bot — verify ต่อ branch)
 // ═══════════════════════════════════════════════════════════════
 app.post("/webhook", async (req, res) => {
+  _cache.clear();   // ข้อมูลคิวอาจเปลี่ยนจากฝั่ง LINE — ล้าง cache ทั้งหมด
   const sig = req.headers["x-line-signature"];
   const buf = req.body;
 
@@ -453,15 +480,17 @@ app.get("/api/admin/overview", async (req, res) => {
     //   หน้ารวมสาขา refresh ทุก 15 วิ จึงกลายเป็นทราฟฟิกก้อนใหญ่ที่สุดของโปรเจกต์
     //   เปลี่ยนเป็นดึง branch_id ของคิวทั้งหมดครั้งเดียวแล้วนับในหน่วยความจำ → 16 request เหลือ 1
     //   (ตาราง queue มีไม่กี่สิบแถว payload เล็กกว่าเดิมมาก)
-    const [{ data: branches }, { data: qrows }] = await Promise.all([
-      supabase.from("branches").select("id,name"),
-      supabase.from("queue").select("branch_id"),
-    ]);
-    const counts = {};
-    (qrows||[]).forEach(r => { counts[r.branch_id] = (counts[r.branch_id]||0) + 1; });
-    const overview = (branches||[]).map(br => ({
-      branchId: br.id, name: br.name, activeQueues: counts[br.id]||0,
-    }));
+    const overview = await cached("overview", 10000, async () => {
+      const [{ data: branches }, { data: qrows }] = await Promise.all([
+        supabase.from("branches").select("id,name"),
+        supabase.from("queue").select("branch_id"),
+      ]);
+      const counts = {};
+      (qrows||[]).forEach(r => { counts[r.branch_id] = (counts[r.branch_id]||0) + 1; });
+      return (branches||[]).map(br => ({
+        branchId: br.id, name: br.name, activeQueues: counts[br.id]||0,
+      }));
+    });
     res.json({ overview });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -477,31 +506,40 @@ app.get("/api/branch/:branchId", async (req, res) => {
     //   ทั้งที่ history เอาไปใช้แค่ "ของวันนี้" เพื่อโชว์ปุ่มคืนสถานะ
     //   จึงรวมมาไว้ใน response เดียว และให้ Postgres กรองเฉพาะวันนี้ตั้งแต่ต้นทาง
     //   ผล: request ต่อรอบลดครึ่ง + payload เล็กลงมาก (เดิมดึง 50 แถวข้ามวัน)
-    const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
-    const [{ data: br }, { data: rows }, { data: hist }] = await Promise.all([
-      supabase.from("branches").select("*").eq("id", branchId).single(),
-      supabase.from("queue").select("*").eq("branch_id", branchId),
-      supabase.from("history").select("*")
-        .eq("branch_id", branchId)
-        .gte("closed_at", startOfToday.toISOString())
-        .order("closed_at", { ascending: false }),
-    ]);
-    if (!br) return res.status(404).json({ error: "Branch not found" });
-    const baysData = {};
-    (rows||[]).forEach(r => {
-      baysData[r.bay] = {
-        plate: r.plate, province: r.province, phone: r.phone,
-        userId: r.line_user_id, bayStatus: r.bay_status,
-        jobs: r.jobs||[], startTime: r.start_time,
-      };
+    // cache 8 วินาที — จอหลายเครื่องที่ดูสาขาเดียวกันใช้ผลร่วมกัน ยิง Supabase ครั้งเดียว
+    // (มี invalidateBranch() ในทุก endpoint ที่แก้ข้อมูล จึงเห็นการเปลี่ยนแปลงทันทีไม่ต้องรอ TTL)
+    const payload = await cached(`branch:${branchId}`, 8000, async () => {
+      const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
+      const [{ data: br }, { data: rows }, { data: hist }] = await Promise.all([
+        supabase.from("branches").select("id,name").eq("id", branchId).maybeSingle(),
+        supabase.from("queue")
+          .select("bay,plate,province,phone,line_user_id,bay_status,jobs,start_time")
+          .eq("branch_id", branchId),
+        supabase.from("history")
+          .select("id,plate,province,jobs,closed_at,cancelled,bay")
+          .eq("branch_id", branchId)
+          .gte("closed_at", startOfToday.toISOString())
+          .order("closed_at", { ascending: false }),
+      ]);
+      if (!br) return null;
+      const baysData = {};
+      (rows||[]).forEach(r => {
+        baysData[r.bay] = {
+          plate: r.plate, province: r.province, phone: r.phone,
+          userId: r.line_user_id, bayStatus: r.bay_status,
+          jobs: r.jobs||[], startTime: r.start_time,
+        };
+      });
+      return { ...br, baysData, todayHistory: (hist||[]).filter(h => !h.cancelled) };
     });
-    const todayHistory = (hist||[]).filter(h => !h.cancelled);
-    res.json({ ...br, baysData, todayHistory });
+    if (!payload) return res.status(404).json({ error: "Branch not found" });
+    res.json(payload);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── Open bay ─────────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay } = req.params;
     const { plate, province, phone, userId } = req.body;
@@ -523,6 +561,7 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
 
 // ─── Start service ────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay } = req.params;
     const row = await getQueueRow(branchId, bay);
@@ -538,6 +577,7 @@ app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
 
 // ─── Update job ───────────────────────────────────────────────
 app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay, jobIdx } = req.params;
     const { status } = req.body;
@@ -555,6 +595,7 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
 
 // ─── Add jobs ─────────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay } = req.params;
     const { jobs: names } = req.body;
@@ -573,6 +614,7 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
 
 // ─── Remove job ───────────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay } = req.params;
     const { jobIdx, nonotify } = req.body;
@@ -591,6 +633,7 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
 
 // ─── Close / Cancel ───────────────────────────────────────────
 app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, bay } = req.params;
     const { nonotify } = req.body;
@@ -803,6 +846,7 @@ app.get("/api/branch/:branchId/history", async (req, res) => {
 
 // ─── Reopen from history ──────────────────────────────────────
 app.post("/api/branch/:branchId/history/:historyId/reopen", async (req, res) => {
+  invalidateBranch(req.params.branchId);   // ล้าง cache ให้เห็นผลทันที
   try {
     const { branchId, historyId } = req.params;
     const { data: h } = await supabase.from("history")
