@@ -681,11 +681,23 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
 //      เพื่อให้ Cloudinary transcode เสร็จและแคชไว้แล้ว ลูกค้าเปิดแล้วเล่นได้ทันที
 const VIDEO_MAX_BITRATE_KBPS = parseInt(process.env.VIDEO_MAX_BITRATE_KBPS || "600", 10);
 
+// 2026-07-29 (ลดโควตา Cloudinary):
+//   แอปฝั่งหน้าจอบันทึกวีดีโอเป็น H.264/AAC 854x480 ที่ 600kbps มาให้อยู่แล้ว
+//   (ดู MediaRecorder ใน cockpit-dashboard.jsx) ตรวจข้อมูลจริงแล้วพบว่าเป็น .mp4 ทั้ง 100%
+//   การให้ Cloudinary แปลงซ้ำเป็น 600kbps h264 อีกรอบจึงไม่ได้อะไรเลย
+//   นอกจากเปลืองเครดิต "video transformation" และทำให้ภาพแย่ลงจากการเข้ารหัสสองชั้น
+//   จึงส่งไฟล์ต้นฉบับให้เลยถ้าเป็น mp4 อยู่แล้ว — แปลงเฉพาะไฟล์ webm/mov ที่ LINE/iOS เล่นไม่ได้
 function buildOptimizedVideoUrl(originalUrl) {
   if (!originalUrl) return originalUrl;
+  if (/\.mp4($|\?)/i.test(originalUrl)) return originalUrl;   // เล่นได้อยู่แล้ว ไม่ต้องแปลง
   const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
   const transform = `q_auto:low,vc_h264,ac_aac,br_${VIDEO_MAX_BITRATE_KBPS}k`;
   return mp4Url.replace("/upload/", `/upload/${transform}/`);
+}
+
+// ต้องอุ่นแคชเฉพาะตอนที่มีการแปลงไฟล์จริง — ถ้าส่งไฟล์ต้นฉบับตรงๆ ไม่มีอะไรให้รอ
+function needsWarm(originalUrl, playUrl) {
+  return playUrl !== originalUrl;
 }
 
 function buildThumbnailUrl(originalUrl) {
@@ -735,8 +747,8 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
       const playUrl = buildOptimizedVideoUrl(videoUrl);
       const previewImageUrl = buildThumbnailUrl(videoUrl);
 
-      // อุ่นแคช Cloudinary ก่อนส่งลิงก์ — กัน iOS โหลดไม่ขึ้นตอน transcode ครั้งแรก
-      await warmVideoUrl(playUrl);
+      // อุ่นแคชเฉพาะกรณีที่ต้องแปลงไฟล์ (webm/mov) — ไฟล์ mp4 ส่งตรงได้เลย ไม่ต้องรอ
+      if (needsWarm(videoUrl, playUrl)) await warmVideoUrl(playUrl);
       // URL ดาวน์โหลด: ใช้หน้า download.html (fetch→blob→save) เพราะ LINE in-app browser
       // ส่วนใหญ่ไม่ยอม trigger การดาวน์โหลดจาก header ตรงๆ (fl_attachment เฉยๆ ใช้ไม่ได้กับ LINE webview)
       const webappBase = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
