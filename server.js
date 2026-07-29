@@ -142,9 +142,13 @@ async function cleanupOldVideos() {
 
     for (const v of oldVideos) {
       try {
-        const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
-        if (match?.[1]) {
-          await cloudinary.uploader.destroy(match[1], { resource_type: "video" });
+        if (isSupabaseVideo(v.video_url)) {
+          await deleteSupabaseVideo(v.video_url);          // ที่เก็บใหม่
+        } else {
+          const match = v.video_url?.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
+          if (match?.[1]) {
+            await cloudinary.uploader.destroy(match[1], { resource_type: "video" });  // คลิปเก่าที่ยังอยู่ Cloudinary
+          }
         }
         await supabase.from("videos").delete().eq("id", v.id);
         console.log(`  ✅ ลบแล้ว: ${v.plate} (${v.id})`);
@@ -681,6 +685,25 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
 //      เพื่อให้ Cloudinary transcode เสร็จและแคชไว้แล้ว ลูกค้าเปิดแล้วเล่นได้ทันที
 const VIDEO_MAX_BITRATE_KBPS = parseInt(process.env.VIDEO_MAX_BITRATE_KBPS || "600", 10);
 
+// ── ที่เก็บวีดีโอใหม่: Supabase Storage (ย้ายจาก Cloudinary 2026-07-29) ──
+const VIDEO_BUCKET = "cockpit-videos";
+function isSupabaseVideo(url) {
+  return !!url && url.includes(`/storage/v1/object/public/${VIDEO_BUCKET}/`);
+}
+// ดึง path ในถังเก็บออกมาจาก URL เพื่อใช้ตอนลบ
+function supabaseVideoPath(url) {
+  const m = url?.match(new RegExp(`/storage/v1/object/public/${VIDEO_BUCKET}/(.+)$`));
+  return m ? decodeURIComponent(m[1].split("?")[0]) : null;
+}
+// ลบวีดีโอ + รูปพรีวิวออกจาก Supabase Storage
+async function deleteSupabaseVideo(url) {
+  const path = supabaseVideoPath(url);
+  if (!path) return;
+  const paths = [path, path.replace(/\.[^.]+$/, ".jpg")];   // ไฟล์วีดีโอ + รูปพรีวิว
+  const { error } = await supabase.storage.from(VIDEO_BUCKET).remove(paths);
+  if (error) console.error("Supabase video delete:", error.message);
+}
+
 // 2026-07-29 (ลดโควตา Cloudinary):
 //   แอปฝั่งหน้าจอบันทึกวีดีโอเป็น H.264/AAC 854x480 ที่ 600kbps มาให้อยู่แล้ว
 //   (ดู MediaRecorder ใน cockpit-dashboard.jsx) ตรวจข้อมูลจริงแล้วพบว่าเป็น .mp4 ทั้ง 100%
@@ -689,6 +712,7 @@ const VIDEO_MAX_BITRATE_KBPS = parseInt(process.env.VIDEO_MAX_BITRATE_KBPS || "6
 //   จึงส่งไฟล์ต้นฉบับให้เลยถ้าเป็น mp4 อยู่แล้ว — แปลงเฉพาะไฟล์ webm/mov ที่ LINE/iOS เล่นไม่ได้
 function buildOptimizedVideoUrl(originalUrl) {
   if (!originalUrl) return originalUrl;
+  if (isSupabaseVideo(originalUrl)) return originalUrl;        // Supabase ส่งไฟล์ตรง ไม่มีระบบแปลงไฟล์
   if (/\.mp4($|\?)/i.test(originalUrl)) return originalUrl;   // เล่นได้อยู่แล้ว ไม่ต้องแปลง
   const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
   const transform = `q_auto:low,vc_h264,ac_aac,br_${VIDEO_MAX_BITRATE_KBPS}k`;
@@ -700,8 +724,13 @@ function needsWarm(originalUrl, playUrl) {
   return playUrl !== originalUrl;
 }
 
-function buildThumbnailUrl(originalUrl) {
+function buildThumbnailUrl(originalUrl, thumbUrl) {
+  if (thumbUrl) return thumbUrl;                 // แอปสร้างและอัปมาให้แล้ว (เส้นทางใหม่)
   if (!originalUrl) return originalUrl;
+  if (isSupabaseVideo(originalUrl)) {
+    // เผื่อกรณีแอปยังไม่ได้อัปเดต — เดาชื่อไฟล์รูปพรีวิวจากชื่อวีดีโอ
+    return originalUrl.replace(/\.[^./?]+($|\?)/, ".jpg$1");
+  }
   const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
   return mp4Url.replace("/upload/", "/upload/so_0/").replace(/\.mp4$/i, ".jpg");
 }
@@ -735,7 +764,7 @@ async function warmVideoUrl(url, timeoutMs = 25000) {
 app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
   try {
     const { branchId, bay } = req.params;
-    const { videoUrl, plate } = req.body;
+    const { videoUrl, thumbUrl, plate } = req.body;
     if (!videoUrl) return res.status(400).json({ error: "videoUrl required" });
     const row = await getQueueRow(branchId, bay);
     const branchName = await getBranchName(branchId);
@@ -745,7 +774,7 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     if (userId) {
       // playUrl = mp4/h264/aac ที่บีบอัดแล้ว (≤ ~600kbps) — เล็กลง + เล่นได้บน iOS/LINE แน่นอน
       const playUrl = buildOptimizedVideoUrl(videoUrl);
-      const previewImageUrl = buildThumbnailUrl(videoUrl);
+      const previewImageUrl = buildThumbnailUrl(videoUrl, thumbUrl);
 
       // อุ่นแคชเฉพาะกรณีที่ต้องแปลงไฟล์ (webm/mov) — ไฟล์ mp4 ส่งตรงได้เลย ไม่ต้องรอ
       if (needsWarm(videoUrl, playUrl)) await warmVideoUrl(playUrl);
@@ -918,7 +947,9 @@ app.delete("/api/branch/:branchId/videos/:videoId", async (req, res) => {
     const { data: v } = await supabase.from("videos")
       .select("video_url").eq("id", +videoId).eq("branch_id", branchId).single();
 
-    if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
+    if (isSupabaseVideo(v?.video_url)) {
+      await deleteSupabaseVideo(v.video_url);              // ที่เก็บใหม่
+    } else if (v?.video_url && process.env.CLOUDINARY_API_KEY) {
       const match = v.video_url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[^.]+)?$/);
       if (match?.[1]) {
         await cloudinary.uploader.destroy(match[1], { resource_type: "video" })
