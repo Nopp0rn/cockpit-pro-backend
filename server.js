@@ -698,9 +698,20 @@ async function warmVideoUrl(url, timeoutMs = 25000) {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const resp = await fetch(url, { method: "GET", signal: controller.signal });
+    // 2026-07-29 (ลดโควตา Cloudinary):
+    //   เดิมใช้ GET ธรรมดา = เซิร์ฟเวอร์ "ดาวน์โหลดวีดีโอทั้งไฟล์" ทุกครั้งที่ส่งให้ลูกค้า
+    //   ทั้งที่จุดประสงค์คือแค่กระตุ้นให้ Cloudinary transcode ให้เสร็จก่อน
+    //   เท่ากับจ่ายค่า bandwidth 2 เท่า (เซิร์ฟเวอร์ 1 + ลูกค้า 1) โดยไม่ได้ประโยชน์
+    //   แก้เป็นขอแค่ไบต์แรก (Range) — Cloudinary ยัง transcode ให้เหมือนเดิม
+    //   แต่เราโหลดจริงแค่ไม่กี่ไบต์ ประหยัด bandwidth ครึ่งหนึ่ง
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" },
+      signal: controller.signal,
+    });
     clearTimeout(timer);
-    if (!resp.ok) console.warn(`⚠️  warmVideoUrl: HTTP ${resp.status} — ${url}`);
+    // 206 = ส่งบางส่วนตามที่ขอ (ปกติ), 200 = ส่งทั้งไฟล์ (บาง CDN ไม่รองรับ Range)
+    if (!resp.ok && resp.status !== 206) console.warn(`⚠️  warmVideoUrl: HTTP ${resp.status} — ${url}`);
     else console.log(`✅ warmVideoUrl: transcode พร้อมแล้ว (${url.split("/upload/")[1]?.split("/")[0]})`);
   } catch (e) {
     // ไม่ throw — ถ้า warm ไม่สำเร็จก็ปล่อยให้ Cloudinary transcode ตอน LINE ดึงเองแทน
