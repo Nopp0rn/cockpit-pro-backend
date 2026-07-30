@@ -589,10 +589,25 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     if (!row) return res.status(404).json({ error: "Not found" });
     const jobs = [...(row.jobs||[])];
     if (!jobs[+jobIdx]) return res.status(400).json({ error: "Invalid index" });
+    // 2026-07-30 (ลดโควตาข้อความ LINE):
+    //   เดิมแจ้งลูกค้าทุกครั้งที่งานเปลี่ยนสถานะ — รถ 1 คันมี 4-5 งาน จึงส่งได้ถึง 8-10 ข้อความ
+    //   ทำให้สาขาที่รถเยอะใช้โควตาหมดกลางเดือน (BR014 เจอ error 429 เมื่อ 30 ก.ค.)
+    //   เปลี่ยนเป็นแจ้ง "ครั้งเดียวตอนงานครบทุกรายการ" ตามที่ตกลงไว้
+    //   (ไม่นับ "รับรถเข้า" เหมือนกับแถบความคืบหน้าในแอป)
+    const realBefore = (row.jobs || []).filter(j => j.name !== "รับรถเข้า");
+    const allDoneBefore = realBefore.length > 0 && realBefore.every(j => j.status === "done");
+
     jobs[+jobIdx] = { ...jobs[+jobIdx], status };
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
-    const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+
+    const realNow = jobs.filter(j => j.name !== "รับรถเข้า");
+    const allDoneNow = realNow.length > 0 && realNow.every(j => j.status === "done");
+
+    // แจ้งเฉพาะ "จังหวะที่เพิ่งครบ" — ถ้าครบอยู่แล้วหรือยังไม่ครบ ไม่ต้องส่ง
+    if (allDoneNow && !allDoneBefore) {
+      const branchName = await getBranchName(branchId);
+      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+    }
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -610,8 +625,8 @@ app.post("/api/branch/:branchId/bay/:bay/addjobs", async (req, res) => {
       .map(n => ({ name:n, duration:getDuration(n), status:"waiting" }));
     const jobs = [...(row.jobs||[]), ...added];
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
-    const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+    // 2026-07-30: ไม่แจ้งลูกค้าตอนเพิ่มงาน — เป็นการจัดการภายใน
+    // ลูกค้าจะได้รับแจ้งตอน "งานครบทุกรายการ" อยู่แล้ว (ลดโควตาข้อความ LINE)
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -627,10 +642,7 @@ app.post("/api/branch/:branchId/bay/:bay/removejob", async (req, res) => {
     const jobs = (row.jobs||[]).filter((_, i) => i !== +jobIdx);
     if (!jobs.length) return res.status(400).json({ error: "Cannot remove all" });
     await supabase.from("queue").update({ jobs }).eq("branch_id", branchId).eq("bay", bay);
-    if (!nonotify) {
-      const branchName = await getBranchName(branchId);
-      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
-    }
+    // 2026-07-30: ไม่แจ้งลูกค้าตอนลบงาน — เป็นการจัดการภายใน (ลดโควตาข้อความ LINE)
     res.json({ success:true, remainingJobs: jobs.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
