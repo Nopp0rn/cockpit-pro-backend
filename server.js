@@ -724,13 +724,29 @@ function needsWarm(originalUrl, playUrl) {
   return playUrl !== originalUrl;
 }
 
-function buildThumbnailUrl(originalUrl, thumbUrl) {
-  if (thumbUrl) return thumbUrl;                 // แอปสร้างและอัปมาให้แล้ว (เส้นทางใหม่)
-  if (!originalUrl) return originalUrl;
+// LINE บังคับว่าข้อความวีดีโอต้องมี previewImageUrl ที่เปิดได้จริง
+// ถ้าส่ง URL ที่ไม่มีไฟล์ (404) ข้อความจะส่งไม่ออก ลูกค้าไม่ได้รับวีดีโอเลย
+// จึงต้องมีรูปสำรองที่มีอยู่จริงเสมอ (โลโก้แอป) เมื่อสร้างรูปพรีวิวไม่สำเร็จ
+function fallbackPreviewUrl() {
+  const base = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
+  return `${base}/Icons/icon-512x512.png`;
+}
+async function buildThumbnailUrl(originalUrl, thumbUrl) {
+  if (thumbUrl) return thumbUrl;                 // แอปสร้างและอัปมาให้แล้ว (เส้นทางปกติ)
+  if (!originalUrl) return fallbackPreviewUrl();
+
   if (isSupabaseVideo(originalUrl)) {
-    // เผื่อกรณีแอปยังไม่ได้อัปเดต — เดาชื่อไฟล์รูปพรีวิวจากชื่อวีดีโอ
-    return originalUrl.replace(/\.[^./?]+($|\?)/, ".jpg$1");
+    // แอปรุ่นเก่า/สร้างรูปไม่สำเร็จ — ลองเดาชื่อไฟล์ แล้วตรวจว่ามีอยู่จริงไหมก่อนใช้
+    const guess = originalUrl.replace(/\.[^./?]+($|\?)/, ".jpg$1");
+    const path = supabaseVideoPath(guess);
+    if (path) {
+      const { data } = await supabase.storage.from(VIDEO_BUCKET)
+        .list(path.split("/").slice(0, -1).join("/"), { search: path.split("/").pop() });
+      if (data && data.length > 0) return guess;   // มีไฟล์จริง ใช้ได้
+    }
+    return fallbackPreviewUrl();                   // ไม่มี — ใช้โลโก้แทน ดีกว่าส่งไม่ออก
   }
+
   const mp4Url = originalUrl.replace(/\.(mov|webm|m4v)$/i, ".mp4");
   return mp4Url.replace("/upload/", "/upload/so_0/").replace(/\.mp4$/i, ".jpg");
 }
@@ -774,7 +790,7 @@ app.post("/api/branch/:branchId/bay/:bay/send-video", async (req, res) => {
     if (userId) {
       // playUrl = mp4/h264/aac ที่บีบอัดแล้ว (≤ ~600kbps) — เล็กลง + เล่นได้บน iOS/LINE แน่นอน
       const playUrl = buildOptimizedVideoUrl(videoUrl);
-      const previewImageUrl = buildThumbnailUrl(videoUrl, thumbUrl);
+      const previewImageUrl = await buildThumbnailUrl(videoUrl, thumbUrl);
 
       // อุ่นแคชเฉพาะกรณีที่ต้องแปลงไฟล์ (webm/mov) — ไฟล์ mp4 ส่งตรงได้เลย ไม่ต้องรอ
       if (needsWarm(videoUrl, playUrl)) await warmVideoUrl(playUrl);
