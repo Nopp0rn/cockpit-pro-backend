@@ -300,14 +300,14 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs, branchId }) {
           }] : []),
         ],
       },
-      // ปุ่มดูคิวหน้าร้าน — แสดงเฉพาะตอนที่งานยังไม่เสร็จ (เสร็จแล้วไม่ต้องดูคิวอีก)
+      // ปุ่มดูสถานะงานซ่อม — แสดงเฉพาะตอนที่งานยังไม่เสร็จ (เสร็จแล้วไม่ต้องดูอีก)
       ...(queueBoardUrl(branchId) && bayStatus !== "done" ? {
         footer: {
           type: "box", layout: "vertical", paddingAll: "12px", spacing: "sm",
           contents: [
             { type: "button", style: "primary", height: "sm", color: "#1A1A1A",
-              action: { type: "uri", label: "📺 ดูคิวหน้าร้าน", uri: queueBoardUrl(branchId) } },
-            { type: "text", text: `${branchName} · ดูสถานะคิวแบบเรียลไทม์`,
+              action: { type: "uri", label: "📺 ดูสถานะงานซ่อม", uri: queueBoardUrl(branchId) } },
+            { type: "text", text: `${branchName} · ดูความคืบหน้าแบบเรียลไทม์`,
               size: "xxs", color: "#9ca3af", align: "center", wrap: true },
           ],
         },
