@@ -233,7 +233,10 @@ async function getBranchIdByUserId(userId) {
    แยกตามสาขาอัตโนมัติจาก branchId ที่ส่งเข้ามา */
 function queueBoardUrl(branchId) {
   const base = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
-  return branchId ? `${base}/tv/${encodeURIComponent(branchId)}` : null;
+  // 2026-08-06: เดิมใช้ /tv/BR014 ซึ่งพึ่ง rewrite ของ Vercel แปลงเป็น ?branch=BR014
+  //   แต่ rewrite ไม่ส่งค่าเข้ามาจริง หน้าเว็บจึงตกไปใช้สาขาแรกในรายการ (อุดรธานี)
+  //   เปลี่ยนมาชี้ไฟล์ตรงพร้อม query string เอง ไม่ต้องพึ่ง rewrite = ไม่มีทางพลาด
+  return branchId ? `${base}/display.html?branch=${encodeURIComponent(branchId)}` : null;
 }
 
 function statusFlex({ plate, branchName, bay, bayStatus, jobs, branchId }) {
