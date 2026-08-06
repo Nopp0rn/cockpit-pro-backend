@@ -227,7 +227,16 @@ async function getBranchIdByUserId(userId) {
   return data?.branch_id || null;
 }
 
-function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
+/* 2026-08-06: แนบลิงก์หน้าดูคิวของสาขาไปกับข้อความ
+   ลูกค้ากดดูสถานะคิวหน้าร้านเองได้ ไม่ต้องโทรถามพนักงาน
+   ใช้หน้าจอเดียวกับจอทีวีหน้าร้าน (/tv/:branchId) ซึ่งเป็นหน้าสาธารณะอยู่แล้ว
+   แยกตามสาขาอัตโนมัติจาก branchId ที่ส่งเข้ามา */
+function queueBoardUrl(branchId) {
+  const base = (process.env.WEBAPP_URL || "https://cockpit-pro-webapp.vercel.app").replace(/\/$/, "");
+  return branchId ? `${base}/tv/${encodeURIComponent(branchId)}` : null;
+}
+
+function statusFlex({ plate, branchName, bay, bayStatus, jobs, branchId }) {
   const real = jobs.filter(j => j.name !== "รับรถเข้า");
   const done = real.filter(j => j.status === "done").length;
   const pct  = real.length ? Math.round(done / real.length * 100) : 0;
@@ -288,6 +297,18 @@ function statusFlex({ plate, branchName, bay, bayStatus, jobs }) {
           }] : []),
         ],
       },
+      // ปุ่มดูคิวหน้าร้าน — แสดงเฉพาะตอนที่งานยังไม่เสร็จ (เสร็จแล้วไม่ต้องดูคิวอีก)
+      ...(queueBoardUrl(branchId) && bayStatus !== "done" ? {
+        footer: {
+          type: "box", layout: "vertical", paddingAll: "12px", spacing: "sm",
+          contents: [
+            { type: "button", style: "primary", height: "sm", color: "#1A1A1A",
+              action: { type: "uri", label: "📺 ดูคิวหน้าร้าน", uri: queueBoardUrl(branchId) } },
+            { type: "text", text: `${branchName} · ดูสถานะคิวแบบเรียลไทม์`,
+              size: "xxs", color: "#9ca3af", align: "center", wrap: true },
+          ],
+        },
+      } : {}),
     },
   };
 }
@@ -469,7 +490,7 @@ app.post("/api/register/submit", async (req, res) => {
     await supabase.from("register_tokens").delete().eq("token", token);
 
     const branchName = await getBranchName(branchId);
-    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
+    await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs, branchId })], branchId);
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -557,7 +578,7 @@ app.post("/api/branch/:branchId/bay/:bay/open", async (req, res) => {
     );
     if (userId) {
       const branchName = await getBranchName(branchId);
-      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs })], branchId);
+      await push(userId, [statusFlex({ plate, branchName, bay, bayStatus:"waiting_entry", jobs, branchId })], branchId);
     }
     res.json({ success: true, bay });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -574,7 +595,7 @@ app.post("/api/branch/:branchId/bay/:bay/start", async (req, res) => {
       .update({ bay_status:"in_service", start_time: new Date().toISOString() })
       .eq("branch_id", branchId).eq("bay", bay);
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:"in_service", jobs:row.jobs, branchId })], branchId);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -606,7 +627,7 @@ app.patch("/api/branch/:branchId/bay/:bay/job/:jobIdx", async (req, res) => {
     // แจ้งเฉพาะ "จังหวะที่เพิ่งครบ" — ถ้าครบอยู่แล้วหรือยังไม่ครบ ไม่ต้องส่ง
     if (allDoneNow && !allDoneBefore) {
       const branchName = await getBranchName(branchId);
-      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs })], branchId);
+      await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs, branchId })], branchId);
     }
     res.json({ success:true, jobs });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -670,7 +691,7 @@ app.post("/api/branch/:branchId/bay/:bay/close", async (req, res) => {
     if (!nonotify && row.line_user_id) {
       await push(row.line_user_id, [statusFlex({
         plate: row.plate, branchName, bay,
-        bayStatus: "done", jobs: doneJobs,
+        bayStatus: "done", jobs: doneJobs, branchId,
       })], branchId);
     }
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -683,7 +704,7 @@ app.post("/api/branch/:branchId/bay/:bay/notify", async (req, res) => {
     const row = await getQueueRow(branchId, bay);
     if (!row) return res.status(404).json({ error: "Not found" });
     const branchName = await getBranchName(branchId);
-    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs })], branchId);
+    await push(row.line_user_id, [statusFlex({ plate:row.plate, branchName, bay, bayStatus:row.bay_status, jobs:row.jobs, branchId })], branchId);
     res.json({ success:true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
